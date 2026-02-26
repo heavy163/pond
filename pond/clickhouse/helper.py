@@ -234,6 +234,7 @@ class FuturesHelper:
         end_time: datetime = None,
         what=None,
         allow_missing_count=0,
+        slow_down_seconds: int = 0,
     ) -> bool:
         table = self.get_futures_table(interval, what)
         if end_time is not None:
@@ -253,7 +254,7 @@ class FuturesHelper:
             if what == "kline":
                 worker = Thread(
                     target=self.__sync_futures_kline,
-                    args=(signal, table, worker_symbols, interval, res_dict),
+                    args=(signal, table, worker_symbols, interval, res_dict, slow_down_seconds),
                 )
                 worker.start()
                 threads.append(worker)
@@ -377,7 +378,7 @@ class FuturesHelper:
         self.clickhouse.save_dataframe(table.__tablename__, klines_df)
 
     def __sync_futures_kline(
-        self, signal, table: FuturesKline1H, symbols, interval, res_dict: dict
+        self, signal, table: FuturesKline1H, symbols, interval, res_dict: dict, slow_down_seconds: int = 0,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -455,6 +456,8 @@ class FuturesHelper:
             ]
             klines_df = klines_df.drop_duplicates(subset=["close_time"])
             self.clickhouse.save_to_db(table, klines_df, table.code == code)
+            if slow_down_seconds > 0:
+                time.sleep(slow_down_seconds)
         res_dict[tid] = True
 
     def __sync_futures_funding_rate(
