@@ -140,7 +140,7 @@ class SpotHelper:
         self.data_proxy = data_proxy
 
     def get_exchange_info(self, signal: datetime):
-        key = str(signal.date())
+        key = signal.isoformat()[:13]
         if key in self.dict_exchange_info.keys():
             return self.dict_exchange_info[key]
         self.dict_exchange_info.clear()
