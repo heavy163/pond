@@ -363,9 +363,10 @@ if __name__ == "__main__":
     import os
 
     crypto_db = CryptoDB(Path(r"E:\DuckDB"))
-    password = os.environ.get("CLICKHOUSE_PWD")
-    conn_str = f"clickhouse://default:{password}@localhost:8123/quant"
-    native_conn_str = f"clickhouse+native://default:{password}@localhost:9000/quant?tcp_keepalive=true"
+    host = os.environ.get("CLICKHOUSE_HOST").strip()
+    password = os.environ.get("CLICKHOUSE_PWD").strip()
+    conn_str = f"clickhouse://default:{password}@{host}:8123/quant"
+    native_conn_str = f"clickhouse+native://default:{password}@{host}:9000/quant?tcp_keepalive=true"
     manager = ClickHouseManager(
         conn_str, data_start=datetime(2020, 1, 1), native_uri=native_conn_str
     )
@@ -375,7 +376,7 @@ if __name__ == "__main__":
     while not ret:
         ret = helper.sync(
             "1h",
-            workers=3,
+            workers=1,
             end_time=datetime.now().replace(hour=0).replace(minute=0),
         )
     print(f"sync ret {ret}")
