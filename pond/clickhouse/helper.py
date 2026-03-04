@@ -399,6 +399,7 @@ class FuturesHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             data_duration_seconds = (signal - lastest_record).total_seconds()
             # load history data and save into db
             if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
@@ -473,6 +474,7 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
             if data_duration_seconds < interval_seconds:
@@ -531,6 +533,7 @@ class FuturesHelper:
             lastest_record = (
                 holder_info[0, "datetime"] if len(holder_info) > 0 else None
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             if (
                 lastest_record is not None
                 and lastest_record + timedelta(seconds=interval_seconds) > signal
@@ -608,6 +611,7 @@ class FuturesHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             if signal - lastest_record < timedelta(days=1):
                 count += 1
                 if self.verbose_log:
@@ -673,6 +677,7 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
             if data_duration_seconds < interval_seconds:
@@ -729,6 +734,7 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
             if data_duration_seconds < interval_seconds:

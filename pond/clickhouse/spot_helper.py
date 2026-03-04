@@ -98,6 +98,7 @@ class DirectDataProxy(DataProxy):
                             "quote_asset": quote_asset,
                             "contract_type": symbol.get("contractType"),
                             "margin_asset": symbol.get("marginAsset"),
+                            "onboardDate": symbol.get("onboardDate"),
                         }
                     )
 
@@ -265,6 +266,7 @@ class SpotHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
+            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
             data_duration_seconds = (signal - lastest_record).total_seconds()
             # load history data and save into db
             if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
