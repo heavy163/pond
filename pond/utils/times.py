@@ -19,6 +19,8 @@ def remove_tz(dt: datetime) -> datetime:
 def datetime2utctimestamp_milli(datetime: datetime) -> int:
     if datetime.tzinfo is not None:
         datetime = datetime.astimezone(dtm.timezone.utc)
+    else:
+        datetime = datetime.replace(tzinfo=dtm.timezone.utc)
     return int(datetime.timestamp() * 1e3)
 
 
