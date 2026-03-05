@@ -170,7 +170,7 @@ class StockHelper:
             time.sleep(0.1)
             latest_record = latest_klines_df.filter(pl.col("code") == symbol)
             lastest_record = (
-                latest_record[0, "datetime"] if len(latest_record) > 0 else sync_start
+                latest_record[0, "datetime"] if len(latest_record) > 0 else self.sync_data_start
             )
             if lastest_record.date() == signal.date():
                 logger.debug(
@@ -214,13 +214,13 @@ if __name__ == "__main__":
     )
     # 此处有天坑，原因是同步机制中增加了start-end限制，避免接口返回异常，如果部分标的再start附近没有数据，start就不会更新，再次查询还是同样的start-end,就下载不了数据。
     # 没想到好的办法解决，在以这个时间为起始时间全部同步完之后，按每次增加1年再同步一遍。
-    sync_start = datetime(2015, 1, 5)
+    sync_start = datetime(2020, 1, 5)
     manager = ClickHouseManager(
         conn_str, data_start=sync_start, native_uri=native_conn_str
     )
     helper = StockHelper(manager, tdx_path=tdx_path)
     helper.fix_data = True
-    helper.sync_data_start = None  # sync_start  # datetime(2024, 10, 31, 15)
+    helper.sync_data_start = sync_start
     ret = False
     sync_end = datetime.now()
     sync_end = datetime(2026, 2, 13)
