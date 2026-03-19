@@ -170,7 +170,9 @@ class StockHelper:
             time.sleep(0.1)
             latest_record = latest_klines_df.filter(pl.col("code") == symbol)
             lastest_record = (
-                latest_record[0, "datetime"] if len(latest_record) > 0 else self.sync_data_start
+                latest_record[0, "datetime"]
+                if len(latest_record) > 0
+                else self.sync_data_start
             )
             if lastest_record.date() == signal.date():
                 logger.debug(
@@ -186,6 +188,9 @@ class StockHelper:
                     end=signal,
                     limit=1000,
                 )
+                if len(klines_df) > 0:
+                    klines_df = klines_df[klines_df["datetime"] > lastest_record]
+                    klines_df = klines_df[klines_df["datetime"] <= signal]
             except Exception as e:
                 logger.error(f"stock helper sync kline failed for {symbol} {e}")
                 klines_df = None
