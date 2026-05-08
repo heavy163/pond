@@ -123,7 +123,7 @@ class BinanceWebSocketClient:
                 f"已达到最大重连尝试次数 ({self.max_reconnect_attempts})，停止尝试"
             )
             return
-
+        self.reconnect_attempts += 1
         # 指数退避算法：delay = base_delay * (2 ^ attempts)
         delay = self.reconnect_base_delay * (2**self.reconnect_attempts)
         delay = min(delay, 60)  # 最大延迟为60秒
@@ -198,15 +198,12 @@ class BinanceWebSocketClient:
     def on_error(self, ws, error):
         """WebSocket错误时的回调"""
         logger.info(f"WebSocket错误: {error}")
+        self.reconnect()
 
     def on_close(self, ws, close_status_code, close_msg):
         """WebSocket关闭时的回调"""
         logger.info(f"WebSocket连接已关闭: {close_status_code} - {close_msg}")
         self.is_connected = False
-
-        # 触发重连逻辑
-        if self.reconnect_attempts < self.max_reconnect_attempts:
-            self.reconnect()
 
     def stop(self):
         """停止WebSocket连接"""
