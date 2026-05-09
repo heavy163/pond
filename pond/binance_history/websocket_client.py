@@ -181,29 +181,40 @@ class BinanceWebSocketClient:
         )
         self.ws_thread.start()
 
-    def on_open(self, ws):
+    def on_open(self, ws: websocket.WebSocketApp):
         """WebSocket连接打开时的回调"""
         logger.info("WebSocket连接已打开")
         self.is_connected = True
         self.reconnect_attempts = 0  # 重置重连尝试次数
 
-    def on_message(self, ws, message):
-        """收到WebSocket消息时的回调"""
+    def on_message(self, ws: websocket.WebSocketApp, msg):
+        # 1. 优先处理币安二进制PING帧（核心修复，必加）
+        if isinstance(msg, bytes) and len(msg) > 0 and msg[0] == 0x09:
+            # 回复PONG帧，原样返回PING的payload（币安要求）
+            ws.send(msg[1:], opcode=websocket.ABNF.OPCODE_PONG)
+            logger.info("WebSocket binary pong")
+            return
+
+        # 2. 正常处理K线数据（你的原有逻辑）
         try:
-            data = json.loads(message)
+            data = json.loads(msg)
+            # 你的K线解析、存储逻辑...
             self.process_kline_data(data)
         except json.JSONDecodeError:
-            logger.info(f"无法解析WebSocket消息: {message}")
+            # 忽略非JSON消息（如币安的ping文本消息，可选处理）
+            if msg == "ping":
+                logger.info("WebSocket text pong")
+                ws.send("pong")  # 兼容极少数文本ping
 
     def on_error(self, ws, error):
         """WebSocket错误时的回调"""
-        logger.info(f"WebSocket错误: {error}")
-        self.reconnect()
+        logger.info(f"WebSocket错误: {error} 错误码: {getattr(error, 'code', 'none')}")
 
     def on_close(self, ws, close_status_code, close_msg):
         """WebSocket关闭时的回调"""
         logger.info(f"WebSocket连接已关闭: {close_status_code} - {close_msg}")
         self.is_connected = False
+        self.reconnect()
 
     def stop(self):
         """停止WebSocket连接"""

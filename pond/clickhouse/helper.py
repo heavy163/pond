@@ -808,6 +808,7 @@ class FuturesHelper:
                 proxy_host=self.proxy_host,
                 proxy_port=self.proxy_port,
                 market_type="futures",
+                max_symbols_per_client=100,
             )
             binance_ws.start_all()
             self.binance_wss[interval] = binance_ws
