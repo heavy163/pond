@@ -761,7 +761,6 @@ class FuturesHelper:
                 lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
             )
             data_duration_seconds = (signal - lastest_record).total_seconds()
-
             if data_duration_seconds < interval_seconds:
                 if self.verbose_log:
                     logger.debug(
@@ -771,6 +770,9 @@ class FuturesHelper:
             logger.info(
                 f"futures helper __sync_futures_extra_info {data_name} for {code}, lastest record is {lastest_record}, signal {signal}"
             )
+            # avoid downloaded duplicated data
+            if lastest_record != self.clickhouse.data_start:
+                lastest_record += timedelta(seconds=1)
             if data_name == "long_short_ratio":
                 df = get_long_short_account_ratio_history(
                     self.binance, code, interval, lastest_record, signal
