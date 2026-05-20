@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from datetime import timedelta
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from loguru import logger
 import polars as pl
@@ -16,6 +17,24 @@ from pond.utils.times import (
     datetime2utctimestamp_milli,
     timeframe2minutes,
 )
+
+# 数据查询超时时间（秒）
+DEFAULT_QUERY_TIMEOUT = 60
+
+# 全局共享的超时查询线程池（单例）
+_timeout_executor = None
+_timeout_executor_lock = threading.Lock()
+
+
+def get_timeout_executor(max_workers: int = 4) -> ThreadPoolExecutor:
+    """获取共享的超时查询线程池（单例模式）"""
+    global _timeout_executor
+    with _timeout_executor_lock:
+        if _timeout_executor is None or _timeout_executor._shutdown:
+            _timeout_executor = ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix="timeout_query_worker"
+            )
+    return _timeout_executor
 
 
 class StockHelper:
@@ -80,6 +99,7 @@ class StockHelper:
         workers: int = 0,
         end_time: datetime | None = None,
         time_col: str = "datetime",
+        query_timeout: int = DEFAULT_QUERY_TIMEOUT,
     ) -> bool:
         table = self.data_proxy.get_table(interval, adjust, product)
         if table is None:
@@ -106,7 +126,15 @@ class StockHelper:
             worker_symbols = symbols[i * task_counts : (i + 1) * task_counts]
             worker = threading.Thread(
                 target=self.__sync_kline,
-                args=(signal, table, worker_symbols, interval, adjust, res_dict),
+                args=(
+                    signal,
+                    table,
+                    worker_symbols,
+                    interval,
+                    adjust,
+                    res_dict,
+                    query_timeout,
+                ),
             )
             worker.start()
             threads.append(worker)
@@ -142,6 +170,42 @@ class StockHelper:
             return False
         return True
 
+    def _get_klines_with_timeout(
+        self,
+        symbol: str,
+        interval: Interval,
+        adjust: Adjust,
+        start: datetime,
+        end: datetime,
+        limit: int = 1000,
+        timeout: int = DEFAULT_QUERY_TIMEOUT,
+    ):
+        """带超时的k线数据查询（使用共享线程池）"""
+
+        def query_func():
+            return self.data_proxy.get_klines(
+                symbol=symbol,
+                period=interval,
+                adjust=adjust,
+                start=start,
+                end=end,
+                limit=limit,
+            )
+
+        # 使用共享的线程池，避免每次创建新线程
+        executor = get_timeout_executor()
+        future = executor.submit(query_func)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            logger.error(
+                f"stock helper get_klines timeout for {symbol}, timeout={timeout}s"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"stock helper get_klines failed for {symbol}: {e}")
+            return None
+
     def __sync_kline(
         self,
         signal: datetime,
@@ -150,6 +214,7 @@ class StockHelper:
         interval: Interval,
         adjust: Adjust,
         res_dict: dict[int, bool],
+        timeout: int = DEFAULT_QUERY_TIMEOUT,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -179,22 +244,21 @@ class StockHelper:
                     f"stock helper sync kline ignore too short duration {lastest_record}-{signal}"
                 )
                 continue
-            try:
-                klines_df = self.data_proxy.get_klines(
-                    symbol=symbol,
-                    period=interval,
-                    adjust=adjust,
-                    start=lastest_record,
-                    end=signal,
-                    limit=1000,
-                )
-                if len(klines_df) > 0:
-                    klines_df = klines_df[klines_df["datetime"] > lastest_record]
-                    klines_df = klines_df[klines_df["datetime"] <= signal]
-            except Exception as e:
-                logger.error(f"stock helper sync kline failed for {symbol} {e}")
-                klines_df = None
+
+            # 带超时的查询
+            klines_df = self._get_klines_with_timeout(
+                symbol=symbol,
+                interval=interval,
+                adjust=adjust,
+                start=lastest_record,
+                end=signal,
+                limit=1000,
+                timeout=timeout,
+            )
+
             if klines_df is not None and len(klines_df) > 0:
+                klines_df = klines_df[klines_df["datetime"] > lastest_record]
+                klines_df = klines_df[klines_df["datetime"] <= signal]
                 klines_df["code"] = symbol
                 if "turn" not in klines_df.columns:
                     klines_df["turn"] = None
@@ -203,6 +267,7 @@ class StockHelper:
                 )
                 klines_df = klines_df.drop_duplicates(subset=["datetime"])
                 self.clickhouse.save_dataframe(table.__tablename__, klines_df)
+
         res_dict[tid] = True
 
 
@@ -237,8 +302,8 @@ if __name__ == "__main__":
     while sync_end > datetime(2020, 1, 1):
         data_proxy.sync_stock_list_date = sync_end
         ret = helper.sync_kline(
-            interval=Interval.MINUTE_5,
-            adjust=Adjust.NFQ,
+            interval=Interval.DAY_1,
+            adjust=Adjust.HFQ,
             workers=1,
             end_time=sync_end,
         )
