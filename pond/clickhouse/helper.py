@@ -254,7 +254,14 @@ class FuturesHelper:
             if what == "kline":
                 worker = Thread(
                     target=self.__sync_futures_kline,
-                    args=(signal, table, worker_symbols, interval, res_dict, slow_down_seconds),
+                    args=(
+                        signal,
+                        table,
+                        worker_symbols,
+                        interval,
+                        res_dict,
+                        slow_down_seconds,
+                    ),
                 )
                 worker.start()
                 threads.append(worker)
@@ -378,7 +385,13 @@ class FuturesHelper:
         self.clickhouse.save_dataframe(table.__tablename__, klines_df)
 
     def __sync_futures_kline(
-        self, signal, table: FuturesKline1H, symbols, interval, res_dict: dict, slow_down_seconds: int = 0,
+        self,
+        signal,
+        table: FuturesKline1H,
+        symbols,
+        interval,
+        res_dict: dict,
+        slow_down_seconds: int = 0,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -399,7 +412,9 @@ class FuturesHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             data_duration_seconds = (signal - lastest_record).total_seconds()
             # load history data and save into db
             if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
@@ -474,7 +489,9 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
             if data_duration_seconds < interval_seconds:
@@ -533,7 +550,9 @@ class FuturesHelper:
             lastest_record = (
                 holder_info[0, "datetime"] if len(holder_info) > 0 else None
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             if (
                 lastest_record is not None
                 and lastest_record + timedelta(seconds=interval_seconds) > signal
@@ -611,7 +630,9 @@ class FuturesHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             if signal - lastest_record < timedelta(days=1):
                 count += 1
                 if self.verbose_log:
@@ -677,7 +698,9 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
             if data_duration_seconds < interval_seconds:
@@ -734,9 +757,10 @@ class FuturesHelper:
             lastest_record = self.clickhouse.get_latest_record_time(
                 table, table.code == code
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             data_duration_seconds = (signal - lastest_record).total_seconds()
-
             if data_duration_seconds < interval_seconds:
                 if self.verbose_log:
                     logger.debug(
@@ -746,6 +770,9 @@ class FuturesHelper:
             logger.info(
                 f"futures helper __sync_futures_extra_info {data_name} for {code}, lastest record is {lastest_record}, signal {signal}"
             )
+            # avoid downloaded duplicated data
+            if lastest_record != self.clickhouse.data_start:
+                lastest_record += timedelta(seconds=1)
             if data_name == "long_short_ratio":
                 df = get_long_short_account_ratio_history(
                     self.binance, code, interval, lastest_record, signal
@@ -781,6 +808,7 @@ class FuturesHelper:
                 proxy_host=self.proxy_host,
                 proxy_port=self.proxy_port,
                 market_type="futures",
+                max_symbols_per_client=100,
             )
             binance_ws.start_all()
             self.binance_wss[interval] = binance_ws
@@ -884,6 +912,21 @@ class FuturesHelper:
         df = df.join(
             holders_df,
             on=["jj_code", "date"],
+            how="left",
+        )
+        return df
+
+    def attach_open_interest(self, df: pl.DataFrame):
+        start = df["close_time"].min()
+        end = df["close_time"].max()
+        df = df.with_columns(close_time=pl.col("close_time").dt.cast_time_unit("ns"))
+        open_interest_df = self.clickhouse.native_read_table(
+            FutureOpenInterest, start, end, filters=None, rename=True
+        )
+        open_interest_df = pl.from_pandas(open_interest_df)
+        df = df.join(
+            open_interest_df,
+            on=["jj_code", "close_time"],
             how="left",
         )
         return df

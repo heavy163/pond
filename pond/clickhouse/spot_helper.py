@@ -266,7 +266,9 @@ class SpotHelper:
                 if len(latest_record) > 0
                 else self.clickhouse.data_start
             )
-            lastest_record = max(lastest_record, datetime.fromtimestamp(symbol["onboardDate"]/1000))
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            )
             data_duration_seconds = (signal - lastest_record).total_seconds()
             # load history data and save into db
             if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
@@ -347,7 +349,9 @@ class SpotHelper:
         )
         existence_df = df.join(spot_kline_df, on=["close_time", "jj_code"], how="full")
         existence_df = existence_df.sort(["jj_code", "close_time"]).with_columns(
-            pl.col("spot_volume").fill_null(strategy="forward").over("jj_code")
+            pl.col("spot_volume")
+            .fill_null(strategy="forward")
+            .over("jj_code", order_by="close_time")
         )
         existence_df = existence_df.with_columns(
             pl.col("spot_volume").is_not_null().alias("spot_existence")
@@ -366,7 +370,9 @@ if __name__ == "__main__":
     host = os.environ.get("CLICKHOUSE_HOST").strip()
     password = os.environ.get("CLICKHOUSE_PWD").strip()
     conn_str = f"clickhouse://default:{password}@{host}:8123/quant"
-    native_conn_str = f"clickhouse+native://default:{password}@{host}:9000/quant?tcp_keepalive=true"
+    native_conn_str = (
+        f"clickhouse+native://default:{password}@{host}:9000/quant?tcp_keepalive=true"
+    )
     manager = ClickHouseManager(
         conn_str, data_start=datetime(2020, 1, 1), native_uri=native_conn_str
     )

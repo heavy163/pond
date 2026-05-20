@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from datetime import timedelta
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 import polars as pl
@@ -195,16 +195,7 @@ class StockHelper:
         # 使用共享的线程池，避免每次创建新线程
         executor = get_timeout_executor()
         future = executor.submit(query_func)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError:
-            logger.error(
-                f"stock helper get_klines timeout for {symbol}, timeout={timeout}s"
-            )
-            return None
-        except Exception as e:
-            logger.error(f"stock helper get_klines failed for {symbol}: {e}")
-            return None
+        return future.result(timeout=timeout)
 
     def __sync_kline(
         self,
