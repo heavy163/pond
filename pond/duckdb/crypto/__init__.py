@@ -190,7 +190,7 @@ class CryptoDB(DuckDB):
         httpx_proxies: dict[str, str] = {},
         skip_symbols: list[str] = [],
         do_filter_quote_volume_0: bool = False,
-        if_skip_usdc: bool = True,
+        if_only_usdt: bool = True,
         ignore_cache=False,
         workers=None,
     ):
@@ -223,6 +223,8 @@ class CryptoDB(DuckDB):
             df = pd.concat([df, manual_df])
 
         df = df.sort_values(by="symbol").drop_duplicates(subset=["symbol"])
+        if if_only_usdt:
+            df = df[df["symbol"].str.endswith("USDT", na=False)]
         if workers is None:
             workers = min(32, (os.cpu_count() or 1) + 4)
         workers = max(1, min(int(workers), len(df) or 1))
@@ -240,7 +242,7 @@ class CryptoDB(DuckDB):
                     httpx_proxies,
                     skip_symbols,
                     do_filter_quote_volume_0,
-                    if_skip_usdc,
+                    if_only_usdt,
                     ignore_cache,
                     i,
                 )
@@ -272,7 +274,7 @@ class CryptoDB(DuckDB):
         httpx_proxies: dict[str, str] = {},
         skip_symbols: list[str] = [],
         do_filter_quote_volume_0: bool = False,
-        if_skip_usdc: bool = True,
+        if_only_usdt: bool = True,
         ignore_cache=False,
         worker_id: int = 0,
     ):
@@ -323,8 +325,8 @@ class CryptoDB(DuckDB):
             if symbol in skip_symbols:
                 logger.warning(f"{symbol} in skip_symbols, skip download.")
                 continue
-            if if_skip_usdc and symbol.endswith("USDC"):
-                logger.warning(f"{symbol} is USDC, skip download.")
+            if if_only_usdt and not symbol.endswith("USDT"):
+                logger.warning(f"{symbol} is not USDT quoted, skip download.")
                 continue
 
             try:
@@ -653,7 +655,7 @@ if __name__ == "__main__":
         httpx_proxies={"https://": "http://127.0.0.1:7890"},
         skip_symbols=["ETHBTC", "BTCDOMUSDT", "USDCUSDT", "BTCSTUSDT"],
         do_filter_quote_volume_0=True,
-        if_skip_usdc=True,
+        if_only_usdt=True,
         ignore_cache=False,
         workers=os.cpu_count() - 2,
     )
@@ -669,7 +671,7 @@ if __name__ == "__main__":
     #             # httpx_proxies={"https://": "https://127.0.0.1:7890"},
     #             skip_symbols=["ETHBTC", "BTCDOMUSDT", "USDCUSDT"],
     #             do_filter_quote_volume_0=False,
-    #             if_skip_usdc=True,
+    #             if_only_usdt=True,
     #             ignore_cache=False,
     #             workers=os.cpu_count() - 2,
     #         )
