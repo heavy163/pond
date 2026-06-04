@@ -169,6 +169,9 @@ class FuturesHelper:
                 if symbol["contractType"] == "PERPETUAL"
                 and symbol["pair"].endswith("USDT")
                 and symbol["status"] == "TRADING"
+                and datetime.now()
+                - datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+                > timedelta(days=1)
             ]
         except Exception as e:
             logger.error(e)
