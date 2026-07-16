@@ -603,6 +603,42 @@ class FuturesHelper:
             )
         res_dict[tid] = synced_count == len(symbols)
 
+    def __fetch_single_info(
+        self, signal, code, onboard_date, latest_records_map,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(onboard_date / 1000)
+        )
+        if signal - lastest_record < timedelta(days=1):
+            return "skip", None
+        query = code[:-4]
+        cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
+        if cg_id is None:
+            return "error", None
+        if cg_id == "":
+            return "ok", pd.DataFrame(
+                {
+                    "datetime": [signal],
+                    "code": [code],
+                    "total_supply": None,
+                    "market_cap_fdv_ratio": None,
+                }
+            )
+        data = get_coin_market_data(cg_id)
+        if data is None:
+            return "error", None
+        total_supply = data.get("total_supply", None)
+        market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
+        return "ok", pd.DataFrame(
+            {
+                "datetime": [signal],
+                "code": [code],
+                "total_supply": [total_supply],
+                "market_cap_fdv_ratio": [market_cap_fdv_ratio],
+            }
+        )
+
     def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -611,66 +647,42 @@ class FuturesHelper:
         info_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        info_df = pl.from_pandas(info_df)
+        latest_records_map = {}
+        if info_df is not None and not info_df.empty:
+            for _, row in info_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
+
         info_dfs = []
-        count = 0
-        for symbol in symbols:
-            code = symbol["pair"]
-            latest_record = info_df.filter(pl.col("code") == code)
-            lastest_record = (
-                latest_record[0, "datetime"]
-                if len(latest_record) > 0
-                else self.clickhouse.data_start
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            if signal - lastest_record < timedelta(days=1):
-                count += 1
-                if self.verbose_log:
-                    logger.info(
-                        f"futures helper sync info ignore too short duration for {code}"
+        inner_workers = min(len(symbols), 10)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_info,
+                    signal, code, symbol["onboardDate"], latest_records_map,
+                )
+                future_map[future] = code
+
+            count = 0
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    status, df = future.result()
+                    if status == "skip":
+                        count += 1
+                        continue
+                    if status == "ok":
+                        info_dfs.append(df)
+                        count += 1
+                    # "error" → don't count
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync info inner task failed for {code}: {e}"
                     )
-                continue
-            query = code[:-4]
-            cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
-            if cg_id is None:
-                logger.warning(
-                    f"futures helper sync info query coin gecko id for {code} failed"
-                )
-                continue
-            if cg_id == "":
-                logger.warning(
-                    f"futures helper sync info can not find coin gecko id for {code}"
-                )
-                info_dfs.append(
-                    pd.DataFrame(
-                        {
-                            "datetime": [signal],
-                            "code": [code],
-                            "total_supply": None,
-                            "market_cap_fdv_ratio": None,
-                        }
-                    )
-                )
-                count += 1
-                continue
-            data = get_coin_market_data(cg_id)
-            if data is None:
-                continue
-            total_supply = data.get("total_supply", None)
-            market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
-            info_dfs.append(
-                pd.DataFrame(
-                    {
-                        "datetime": [signal],
-                        "code": [code],
-                        "total_supply": [total_supply],
-                        "market_cap_fdv_ratio": [market_cap_fdv_ratio],
-                    }
-                )
-            )
-            count += 1
+
         if info_dfs:
             merged_df = pd.concat(info_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
