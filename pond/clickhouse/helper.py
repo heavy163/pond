@@ -826,6 +826,40 @@ class FuturesHelper:
             self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = True
 
+    def __fetch_single_extra_info(
+        self,
+        data_name,
+        code,
+        symbol_onboard_date,
+        table,
+        interval,
+        interval_seconds,
+        signal,
+        latest_records_map,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(symbol_onboard_date / 1000)
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+        if data_duration_seconds < interval_seconds:
+            return None
+        if lastest_record != self.clickhouse.data_start:
+            lastest_record += timedelta(seconds=1)
+        if data_name == "long_short_ratio":
+            df = get_long_short_account_ratio_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        elif data_name == "long_short_position_ratio":
+            df = get_long_short_position_ratio_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        elif data_name == "open_interest":
+            df = get_open_interest_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        return df
+
     def __sync_futures_extra_info(
         self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict
     ):
@@ -852,44 +886,46 @@ class FuturesHelper:
         except Exception as e:
             logger.error(f"futures helper sync {data_name} batch query failed {e}")
 
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
+        extra_dfs = []
+        inner_workers = min(len(symbols), 10)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_extra_info,
+                    data_name,
+                    code,
+                    symbol["onboardDate"],
+                    table,
+                    interval,
+                    interval_seconds,
+                    signal,
+                    latest_records_map,
+                )
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is None:
+                        failure_count += 1
+                        continue
+                    if len(result) == 0:
+                        continue
+                    extra_dfs.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync {data_name} inner task failed for {code}: {e}"
                     )
-                continue
-            logger.info(
-                f"futures helper __sync_futures_extra_info {data_name} for {code}, lastest record is {lastest_record}, signal {signal}"
-            )
-            # avoid downloaded duplicated data
-            if lastest_record != self.clickhouse.data_start:
-                lastest_record += timedelta(seconds=1)
-            if data_name == "long_short_ratio":
-                df = get_long_short_account_ratio_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            elif data_name == "long_short_position_ratio":
-                df = get_long_short_position_ratio_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            elif data_name == "open_interest":
-                df = get_open_interest_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            if df is None:
-                failure_count += 1
-                continue
-            if len(df) == 0:
-                continue
-            self.clickhouse.save_to_db(table, df, table.code == code)
-            time.sleep(0.01)
+                    failure_count += 1
+
+        if extra_dfs:
+            merged_df = pd.concat(extra_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = failure_count <= allow_missing_count
 
     def subscribe_futures(
