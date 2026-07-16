@@ -409,6 +409,7 @@ class FuturesHelper:
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
         latest_klines_df = pl.from_pandas(latest_klines_df)
+        klines_dfs = []
         for symbol in symbols:
             code = symbol["pair"]
             latest_record = latest_klines_df.filter(pl.col("code") == code)
@@ -476,9 +477,12 @@ class FuturesHelper:
                 klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
             ]
             klines_df = klines_df.drop_duplicates(subset=["close_time"])
-            self.clickhouse.save_to_db(table, klines_df, table.code == code)
+            klines_dfs.append(klines_df)
             if slow_down_seconds > 0:
                 time.sleep(slow_down_seconds)
+        if klines_dfs:
+            merged_df = pd.concat(klines_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = True
 
     def __sync_futures_funding_rate(
