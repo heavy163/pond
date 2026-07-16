@@ -6,7 +6,6 @@ from typing import Optional
 import datetime as dtm
 from datetime import datetime
 import time
-import traceback
 import polars as pl
 from binance.um_futures import UMFutures
 from pond.clickhouse.kline import (
@@ -433,7 +432,10 @@ class FuturesHelper:
         limit_seconds,
         signal,
         slow_down_seconds,
+        _banned: threading.Event = None,
     ):
+        if _banned and _banned.is_set():
+            return None
         lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
         lastest_record = max(
             lastest_record,
@@ -471,10 +473,17 @@ class FuturesHelper:
             if not klines_list:
                 klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
         except Exception as e:
-            logger.error(
-                f"futures helper sync kline failed for {code}: {e}\n"
-                f"{traceback.format_exc()}"
-            )
+            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            if status == 418:
+                logger.error(
+                    f"futures helper sync kline 418 banned for {code}: {e}"
+                )
+                if _banned is not None:
+                    _banned.set()
+            else:
+                logger.error(
+                    f"futures helper sync kline failed for {code}: {e}"
+                )
             return None
 
         cols = list(table().get_colcom_names().values())[1:] + ["stub"]
@@ -513,18 +522,21 @@ class FuturesHelper:
                 latest_records_map[row["code"]] = row["datetime"]
 
         klines_dfs = []
-        inner_workers = min(len(symbols), 10)
+        _banned = threading.Event()
+        inner_workers = min(len(symbols), 8)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
             future_map = {}
             for s in symbols:
+                if _banned.is_set():
+                    break
                 code = s["pair"]
                 future = executor.submit(
                     self.__fetch_single_kline,
                     code, s["onboardDate"], latest_records_map,
                     table, interval, interval_seconds, limit_seconds,
-                    signal, slow_down_seconds,
+                    signal, slow_down_seconds, _banned,
                 )
                 future_map[future] = code
 
@@ -753,7 +765,10 @@ class FuturesHelper:
         interval_seconds,
         signal,
         latest_records_map,
+        _banned: threading.Event = None,
     ):
+        if _banned and _banned.is_set():
+            return None
         lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
         lastest_record = max(
             lastest_record, datetime.fromtimestamp(symbol_onboard_date / 1000)
@@ -774,10 +789,17 @@ class FuturesHelper:
             if not funding_list or len(funding_list) == 0:
                 return None
         except Exception as e:
-            logger.error(
-                f"futures helper sync funding rate for {code} failed {e}\n"
-                f"{traceback.format_exc()}"
-            )
+            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            if status == 418:
+                logger.error(
+                    f"futures helper sync funding rate 418 banned for {code}: {e}"
+                )
+                if _banned is not None:
+                    _banned.set()
+            else:
+                logger.error(
+                    f"futures helper sync funding rate failed for {code}: {e}"
+                )
             return None
         cols = list(table().get_colcom_names().values())
         funding_rate_df = pd.DataFrame(funding_list, columns=cols)
@@ -811,17 +833,20 @@ class FuturesHelper:
             logger.error(f"futures helper sync funding_rate batch query failed {e}")
 
         funding_dfs = []
-        inner_workers = min(len(symbols), 10)
+        _banned = threading.Event()
+        inner_workers = min(len(symbols), 8)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
             future_map = {}
             for s in symbols:
+                if _banned.is_set():
+                    break
                 code = s["pair"]
                 future = executor.submit(
                     self.__fetch_single_funding_rate,
                     code, s["onboardDate"], table, interval,
-                    interval_seconds, signal, latest_records_map,
+                    interval_seconds, signal, latest_records_map, _banned,
                 )
                 future_map[future] = code
 
@@ -1167,7 +1192,7 @@ if __name__ == "__main__":
             workers=3,
             end_time=end_time,
             what="kline",
-            slow_down_seconds=0.1,
+            slow_down_seconds=0.01,
         )
         print(f"sync ret {ret}")
 
