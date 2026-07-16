@@ -49,40 +49,6 @@ from binance.client import Client
 from pond.binance_history.websocket_client import BinanceWSClientWrapper
 
 
-class WeightTokenBucket:
-    """线程安全的权重令牌桶，模拟 Binance 每分钟权重限额，天然平滑流量。"""
-
-    def __init__(self, max_weight: int = 2400, refill_sec: float = 60.0):
-        self._max = max_weight
-        self._rate = max_weight / refill_sec
-        self._tokens = float(max_weight)
-        self._last_refill = time.time()
-        self._lock = threading.Lock()
-
-    def _refill(self):
-        now = time.time()
-        elapsed = now - self._last_refill
-        self._tokens = min(self._max, self._tokens + elapsed * self._rate)
-        self._last_refill = now
-
-    def consume(self, weight: int = 2) -> float:
-        """消耗 weight 个令牌，返回需等待的秒数（0 表示无需等待）。"""
-        with self._lock:
-            self._refill()
-            if self._tokens >= weight:
-                self._tokens -= weight
-                return 0.0
-            deficit = weight - self._tokens
-            self._tokens = 0.0
-            return deficit / self._rate
-
-    @property
-    def available(self) -> float:
-        with self._lock:
-            self._refill()
-            return self._tokens
-
-
 class DataProxy:
     def um_future_exchange_info(self) -> dict:
         pass
@@ -156,62 +122,20 @@ class AsyncDirectDataProxy(DataProxy):
     _exchange_info_cache = None
     _exchange_info_cache_time = None
 
-    _MAX_RETRIES = 10
-    _bucket = WeightTokenBucket()
-
-    async def _request(self, path: str, params: dict | None = None, weight: int = 2):
-        """令牌桶限流 + 遇到 418/429 自动等待解封后重试。"""
-        # 1. 令牌桶消费，不够则等待
-        wait = self._bucket.consume(weight)
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-        for attempt in range(1, self._MAX_RETRIES + 1):
-            async with aiohttp.ClientSession(self.base_url) as session:
-                async with session.get(path, params=params) as resp:
-                    body = await resp.json(encoding="utf-8")
-                    if resp.status < 400:
-                        return body
-
-                    err_msg = str(body)
-                    sleep_sec = 0
-
-                    if resp.status == 418:
-                        m = re.search(r"banned until (\d{13})", err_msg)
-                        if m:
-                            ban_ts = int(m.group(1)) / 1000
-                            sleep_sec = ban_ts - time.time() + 1
-                            logger.warning(
-                                f"418 banned until {ban_ts}, "
-                                f"wait {sleep_sec:.0f}s (attempt {attempt}/{self._MAX_RETRIES})"
-                            )
-                    elif resp.status == 429:
-                        ra = resp.headers.get("Retry-After")
-                        sleep_sec = int(ra) + 1 if ra else 30
-                        logger.warning(
-                            f"429 rate limited, "
-                            f"wait {sleep_sec}s (attempt {attempt}/{self._MAX_RETRIES})"
-                        )
-                    else:
-                        raise aiohttp.ClientResponseError(
-                            request_info=resp.request_info,
-                            history=resp.history,
-                            status=resp.status,
-                            message=f"HTTP {resp.status}: {body}",
-                            headers=resp.headers,
-                        )
-
-                    if attempt < self._MAX_RETRIES and sleep_sec > 0:
-                        await asyncio.sleep(sleep_sec)
-                    else:
-                        raise aiohttp.ClientResponseError(
-                            request_info=resp.request_info,
-                            history=resp.history,
-                            status=resp.status,
-                            message=f"HTTP {resp.status}: {body}",
-                            headers=resp.headers,
-                        )
-        return None
+    async def _request(self, path: str, params: dict | None = None):
+        """发起 GET 请求，自动检查 HTTP 状态码并记录错误响应体。"""
+        async with aiohttp.ClientSession(self.base_url) as session:
+            async with session.get(path, params=params) as resp:
+                body = await resp.json(encoding="utf-8")
+                if resp.status >= 400:
+                    raise aiohttp.ClientResponseError(
+                        request_info=resp.request_info,
+                        history=resp.history,
+                        status=resp.status,
+                        message=f"HTTP {resp.status}: {body}",
+                        headers=resp.headers,
+                    )
+                return body
 
     async def um_future_exchange_info(self) -> dict:
         current_time = time.time()
