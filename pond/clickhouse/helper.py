@@ -49,6 +49,40 @@ from binance.client import Client
 from pond.binance_history.websocket_client import BinanceWSClientWrapper
 
 
+class WeightTokenBucket:
+    """线程安全的权重令牌桶，模拟 Binance 每分钟权重限额，天然平滑流量。"""
+
+    def __init__(self, max_weight: int = 2400, refill_sec: float = 60.0):
+        self._max = max_weight
+        self._rate = max_weight / refill_sec
+        self._tokens = float(max_weight)
+        self._last_refill = time.time()
+        self._lock = threading.Lock()
+
+    def _refill(self):
+        now = time.time()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._max, self._tokens + elapsed * self._rate)
+        self._last_refill = now
+
+    def consume(self, weight: int = 2) -> float:
+        """消耗 weight 个令牌，返回需等待的秒数（0 表示无需等待）。"""
+        with self._lock:
+            self._refill()
+            if self._tokens >= weight:
+                self._tokens -= weight
+                return 0.0
+            deficit = weight - self._tokens
+            self._tokens = 0.0
+            return deficit / self._rate
+
+    @property
+    def available(self) -> float:
+        with self._lock:
+            self._refill()
+            return self._tokens
+
+
 class DataProxy:
     def um_future_exchange_info(self) -> dict:
         pass
@@ -122,20 +156,62 @@ class AsyncDirectDataProxy(DataProxy):
     _exchange_info_cache = None
     _exchange_info_cache_time = None
 
-    async def _request(self, path: str, params: dict | None = None):
-        """发起 GET 请求，自动检查 HTTP 状态码并记录错误响应体。"""
-        async with aiohttp.ClientSession(self.base_url) as session:
-            async with session.get(path, params=params) as resp:
-                body = await resp.json(encoding="utf-8")
-                if resp.status >= 400:
-                    raise aiohttp.ClientResponseError(
-                        request_info=resp.request_info,
-                        history=resp.history,
-                        status=resp.status,
-                        message=f"HTTP {resp.status}: {body}",
-                        headers=resp.headers,
-                    )
-                return body
+    _MAX_RETRIES = 10
+    _bucket = WeightTokenBucket()
+
+    async def _request(self, path: str, params: dict | None = None, weight: int = 2):
+        """令牌桶限流 + 遇到 418/429 自动等待解封后重试。"""
+        # 1. 令牌桶消费，不够则等待
+        wait = self._bucket.consume(weight)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            async with aiohttp.ClientSession(self.base_url) as session:
+                async with session.get(path, params=params) as resp:
+                    body = await resp.json(encoding="utf-8")
+                    if resp.status < 400:
+                        return body
+
+                    err_msg = str(body)
+                    sleep_sec = 0
+
+                    if resp.status == 418:
+                        m = re.search(r"banned until (\d{13})", err_msg)
+                        if m:
+                            ban_ts = int(m.group(1)) / 1000
+                            sleep_sec = ban_ts - time.time() + 1
+                            logger.warning(
+                                f"418 banned until {ban_ts}, "
+                                f"wait {sleep_sec:.0f}s (attempt {attempt}/{self._MAX_RETRIES})"
+                            )
+                    elif resp.status == 429:
+                        ra = resp.headers.get("Retry-After")
+                        sleep_sec = int(ra) + 1 if ra else 30
+                        logger.warning(
+                            f"429 rate limited, "
+                            f"wait {sleep_sec}s (attempt {attempt}/{self._MAX_RETRIES})"
+                        )
+                    else:
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message=f"HTTP {resp.status}: {body}",
+                            headers=resp.headers,
+                        )
+
+                    if attempt < self._MAX_RETRIES and sleep_sec > 0:
+                        await asyncio.sleep(sleep_sec)
+                    else:
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message=f"HTTP {resp.status}: {body}",
+                            headers=resp.headers,
+                        )
+        return None
 
     async def um_future_exchange_info(self) -> dict:
         current_time = time.time()
@@ -647,27 +723,15 @@ class FuturesHelper:
             for _, row in latest_klines_df.iterrows():
                 latest_records_map[row["code"]] = row["datetime"]
 
-        _sem = asyncio.Semaphore(20)
-        _need_slow = max(slow_down_seconds, 0)
-
-        async def _fetch_one(symbol):
-            async with _sem:
-                if _need_slow:
-                    await asyncio.sleep(_need_slow)
-                return await self.__async_fetch_single_kline(
-                    symbol["pair"],
-                    symbol["onboardDate"],
-                    latest_records_map,
-                    table,
-                    interval,
-                    interval_seconds,
-                    limit_seconds,
-                    signal,
-                    slow_down_seconds,
-                )
-
         async def _run_async():
-            tasks = [_fetch_one(s) for s in symbols]
+            tasks = [
+                self.__async_fetch_single_kline(
+                    s["pair"], s["onboardDate"], latest_records_map,
+                    table, interval, interval_seconds, limit_seconds,
+                    signal, slow_down_seconds,
+                )
+                for s in symbols
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             klines_dfs = []
             for i, result in enumerate(results):
@@ -1000,22 +1064,14 @@ class FuturesHelper:
         except Exception as e:
             logger.error(f"futures helper sync funding_rate batch query failed {e}")
 
-        _sem = asyncio.Semaphore(20)
-
-        async def _fetch_one(symbol):
-            async with _sem:
-                return await self.__async_fetch_single_funding_rate(
-                    symbol["pair"],
-                    symbol["onboardDate"],
-                    table,
-                    interval,
-                    interval_seconds,
-                    signal,
-                    latest_records_map,
-                )
-
         async def _run_async():
-            tasks = [_fetch_one(s) for s in symbols]
+            tasks = [
+                self.__async_fetch_single_funding_rate(
+                    s["pair"], s["onboardDate"], table, interval,
+                    interval_seconds, signal, latest_records_map,
+                )
+                for s in symbols
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             funding_dfs = []
             for i, result in enumerate(results):
