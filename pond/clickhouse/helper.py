@@ -280,7 +280,7 @@ class FuturesHelper:
                 sync_tasks.append(
                     (
                         self.__sync_futures_funding_rate,
-                        (signal, table, worker_symbols, interval, res_dict),
+                        (signal, table, worker_symbols, interval, res_dict, slow_down_seconds),
                     )
                 )
             elif what == "holders":
@@ -462,6 +462,7 @@ class FuturesHelper:
             return None
 
         startTime = datetime2utctimestamp_milli(lastest_record)
+        _t0 = time.time()
         try:
             klines_list = self.data_proxy.um_future_klines(
                 code,
@@ -485,6 +486,11 @@ class FuturesHelper:
                     f"futures helper sync kline failed for {code}: {e}"
                 )
             return None
+        finally:
+            if slow_down_seconds > 0:
+                _elapsed = time.time() - _t0
+                if _elapsed < slow_down_seconds:
+                    time.sleep(slow_down_seconds - _elapsed)
 
         cols = list(table().get_colcom_names().values())[1:] + ["stub"]
         klines_df = pd.DataFrame(klines_list, columns=cols)
@@ -772,6 +778,7 @@ class FuturesHelper:
         interval_seconds,
         signal,
         latest_records_map,
+        slow_down_seconds=0,
         _banned: threading.Event = None,
     ):
         if _banned and _banned.is_set():
@@ -785,6 +792,7 @@ class FuturesHelper:
         if data_duration_seconds < interval_seconds:
             return None
         startTime = datetime2utctimestamp_milli(lastest_record)
+        _t0 = time.time()
         try:
             funding_list = self.data_proxy.um_future_funding_rate(
                 code,
@@ -808,6 +816,11 @@ class FuturesHelper:
                     f"futures helper sync funding rate failed for {code}: {e}"
                 )
             return None
+        finally:
+            if slow_down_seconds > 0:
+                _elapsed = time.time() - _t0
+                if _elapsed < slow_down_seconds:
+                    time.sleep(slow_down_seconds - _elapsed)
         cols = list(table().get_colcom_names().values())
         funding_rate_df = pd.DataFrame(funding_list, columns=cols)
         funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
@@ -821,7 +834,8 @@ class FuturesHelper:
         return funding_rate_df
 
     def __sync_futures_funding_rate(
-        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict
+        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict,
+        slow_down_seconds: int = 0,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -853,7 +867,8 @@ class FuturesHelper:
                 future = executor.submit(
                     self.__fetch_single_funding_rate,
                     code, s["onboardDate"], table, interval,
-                    interval_seconds, signal, latest_records_map, _banned,
+                    interval_seconds, signal, latest_records_map,
+                    slow_down_seconds, _banned,
                 )
                 future_map[future] = code
 
