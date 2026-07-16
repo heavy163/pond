@@ -401,14 +401,15 @@ class FuturesHelper:
             lastest_count = count_df.iloc[0]["cnt"]
             lastest_time = count_df.iloc[0]["datetime"]
             # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval
-            # ClickHouse 返回本地时间 (Asia/Shanghai UTC+8), signal 可能为本地或 UTC
-            # 统一转 UTC 后比较: local + time.timezone = UTC
-            _west = time.timezone  # UTC+8 → -28800
-            _lastest_utc = lastest_time + dtm.timedelta(seconds=_west)
-            _signal_utc = (
-                signal + dtm.timedelta(seconds=_west) if _end_time_is_set else signal
-            )
-            time_gap = abs((_signal_utc - _lastest_utc).total_seconds())
+            # 全部在本地时区下比较，方便调试
+            # lastest_time 来自 CH 已是本地时间
+            if _end_time_is_set:
+                # signal 是调用方传入的本地时间
+                _signal_local = signal
+            else:
+                # signal 是 UTC，转成本地时间
+                _signal_local = signal - dtm.timedelta(seconds=time.timezone)
+            time_gap = abs((_signal_local - lastest_time).total_seconds())
             max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(
