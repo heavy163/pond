@@ -696,11 +696,20 @@ class FuturesHelper:
         interval_seconds = timeframe2minutes(interval) * 60
         if signal is None:
             signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
+        latest_records_map = {}
+        try:
+            latest_records_df = self.clickhouse.read_latest_n_record(
+                table.__tablename__, signal - timedelta(days=30), signal, n=1
+            )
+            if latest_records_df is not None and not latest_records_df.empty:
+                for _, row in latest_records_df.iterrows():
+                    latest_records_map[row["code"]] = row["datetime"]
+        except Exception as e:
+            logger.error(f"futures helper sync funding_rate batch query failed {e}")
+
         for symbol in symbols:
             code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
-            )
+            lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
             lastest_record = max(
                 lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
             )
@@ -755,11 +764,20 @@ class FuturesHelper:
         elif data_name == "long_short_position_ratio":
             table = FutureLongShortPositionRatio
 
+        latest_records_map = {}
+        try:
+            latest_records_df = self.clickhouse.read_latest_n_record(
+                table.__tablename__, signal - timedelta(days=30), signal, n=1
+            )
+            if latest_records_df is not None and not latest_records_df.empty:
+                for _, row in latest_records_df.iterrows():
+                    latest_records_map[row["code"]] = row["datetime"]
+        except Exception as e:
+            logger.error(f"futures helper sync {data_name} batch query failed {e}")
+
         for symbol in symbols:
             code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
-            )
+            lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
             lastest_record = max(
                 lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
             )
