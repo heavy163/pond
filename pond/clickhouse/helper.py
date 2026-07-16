@@ -122,6 +122,21 @@ class AsyncDirectDataProxy(DataProxy):
     _exchange_info_cache = None
     _exchange_info_cache_time = None
 
+    async def _request(self, path: str, params: dict | None = None):
+        """发起 GET 请求，自动检查 HTTP 状态码并记录错误响应体。"""
+        async with aiohttp.ClientSession(self.base_url) as session:
+            async with session.get(path, params=params) as resp:
+                body = await resp.json(encoding="utf-8")
+                if resp.status >= 400:
+                    raise aiohttp.ClientResponseError(
+                        request_info=resp.request_info,
+                        history=resp.history,
+                        status=resp.status,
+                        message=f"HTTP {resp.status}: {body}",
+                        headers=resp.headers,
+                    )
+                return body
+
     async def um_future_exchange_info(self) -> dict:
         current_time = time.time()
         if (
@@ -130,9 +145,7 @@ class AsyncDirectDataProxy(DataProxy):
             and current_time - self._exchange_info_cache_time < 24 * 60 * 60
         ):
             return self._exchange_info_cache
-        async with aiohttp.ClientSession(self.base_url) as session:
-            async with session.get("/fapi/v1/exchangeInfo") as resp:
-                data = await resp.json(encoding="utf-8")
+        data = await self._request("/fapi/v1/exchangeInfo")
         self._exchange_info_cache = data
         self._exchange_info_cache_time = current_time
         return data
@@ -147,9 +160,7 @@ class AsyncDirectDataProxy(DataProxy):
             "startTime": startTime,
             "limit": limit,
         }
-        async with aiohttp.ClientSession(self.base_url) as session:
-            async with session.get("/fapi/v1/continuousKlines", params=params) as resp:
-                return await resp.json(encoding="utf-8")
+        return await self._request("/fapi/v1/continuousKlines", params)
 
     async def um_future_funding_rate(
         self, symbol, contract_type, interval, startTime, limit
@@ -159,9 +170,7 @@ class AsyncDirectDataProxy(DataProxy):
             "startTime": startTime,
             "limit": limit,
         }
-        async with aiohttp.ClientSession(self.base_url) as session:
-            async with session.get("/fapi/v1/fundingRate", params=params) as resp:
-                return await resp.json(encoding="utf-8")
+        return await self._request("/fapi/v1/fundingRate", params)
 
     async def close(self):
         pass
