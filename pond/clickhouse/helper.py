@@ -518,6 +518,50 @@ class FuturesHelper:
             self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = True
 
+    def __fetch_single_holders(
+        self, signal, code, base_asset, onboard_date, interval_seconds, latest_records_map
+    ):
+        lastest_record = latest_records_map.get(code)
+        if lastest_record is not None:
+            lastest_record = max(
+                lastest_record, datetime.fromtimestamp(onboard_date / 1000)
+            )
+            if lastest_record + timedelta(seconds=interval_seconds) > signal:
+                return "skip", None
+        try:
+            cg_id = self.gecko_id_mapper.get_coingecko_id(
+                base_asset, exact_match=True
+            )
+            if cg_id is None:
+                return "error", None
+            if cg_id == "":
+                return "noop", None
+            chain_info = self.contact_tool.get_token_chain_info(cg_id)
+            if chain_info is None:
+                return "error", None
+            if len(chain_info) == 0:
+                return "noop", None
+            holders_dfs = []
+            for chain, address in chain_info.items():
+                if address is None or len(address.strip()) == 0:
+                    continue
+                chain_id = ChainId.get_chain_id(chain)
+                if chain_id is None:
+                    continue
+                holders = self.chainbase_client.get_topn_holders(
+                    chain_id, address, page=1, limit=20
+                )
+                time.sleep(1)
+                df = pd.DataFrame(data=holders)
+                df["chain"] = chain
+                df["code"] = code
+                df["datetime"] = signal
+                holders_dfs.append(df)
+        except Exception as e:
+            logger.error(f"futures helper sync holders for {code} failed {e}")
+            return "error", None
+        return "ok", holders_dfs if holders_dfs else None
+
     def __sync_futures_base_asset_holders(
         self, table: TokenHolders, symbols, interval, res_dict: dict
     ):
@@ -529,73 +573,46 @@ class FuturesHelper:
         holders_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        holders_df = pl.from_pandas(holders_df)
-        synced_count = 0
+        latest_records_map = {}
+        if holders_df is not None and not holders_df.empty:
+            for _, row in holders_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
+
         all_holders_dfs = []
-        for symbol in symbols:
-            code = symbol["pair"]
-            base_asset = symbol["baseAsset"]
-            holder_info = holders_df.filter(pl.col("code") == code)
-            lastest_record = (
-                holder_info[0, "datetime"] if len(holder_info) > 0 else None
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            if (
-                lastest_record is not None
-                and lastest_record + timedelta(seconds=interval_seconds) > signal
-            ):
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper token holders ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                synced_count += 1
-                continue
-            try:
-                cg_id = self.gecko_id_mapper.get_coingecko_id(
-                    base_asset, exact_match=True
+        synced_count = 0
+        inner_workers = min(len(symbols), 10)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_holders,
+                    signal, code, symbol["baseAsset"],
+                    symbol["onboardDate"], interval_seconds, latest_records_map,
                 )
-                if cg_id is None:
-                    logger.warning(
-                        f"futures helper sync holders query coin gecko id for {code} failed"
-                    )
-                    continue
-                if cg_id == "":
-                    if self.verbose_log:
-                        logger.info(
-                            f"futures helper sync holders can not find coin gecko id for {code}"
-                        )
-                    synced_count += 1
-                    continue
-                chain_info = self.contact_tool.get_token_chain_info(cg_id)
-                holders_dfs = []
-                if chain_info is None:
-                    continue
-                if len(chain_info) == 0:
-                    synced_count += 1
-                    continue
-                for chain, address in chain_info.items():
-                    if address is None or len(address.strip()) == 0:
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    status, dfs = future.result()
+                    if status == "skip":
+                        synced_count += 1
                         continue
-                    chain_id = ChainId.get_chain_id(chain)
-                    if chain_id is None:
+                    if status == "noop":
+                        synced_count += 1
                         continue
-                    holders = self.chainbase_client.get_topn_holders(
-                        chain_id, address, page=1, limit=20
+                    if status == "ok" and dfs:
+                        all_holders_dfs.extend(dfs)
+                        synced_count += 1
+                    # "error" → don't count
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync holders inner task failed for {code}: {e}"
                     )
-                    time.sleep(1)
-                    df = pd.DataFrame(data=holders)
-                    df["chain"] = chain
-                    df["code"] = code
-                    df["datetime"] = signal
-                    holders_dfs.append(df)
-            except Exception as e:
-                logger.error(f"futures helper sync holders for {code} failed {e}")
-                continue
-            if len(holders_dfs) > 0:
-                all_holders_dfs.extend(holders_dfs)
-            synced_count += 1
+
         if all_holders_dfs:
             merged_df = pd.concat(all_holders_dfs, ignore_index=True)
             self.clickhouse.save_to_db(
