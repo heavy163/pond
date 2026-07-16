@@ -1,5 +1,6 @@
 import os
 import math
+import concurrent.futures
 from pond.clickhouse.manager import ClickHouseManager
 from typing import Optional
 import datetime as dtm
@@ -389,6 +390,76 @@ class FuturesHelper:
         logger.debug(f"futures helper save_klines_from_ws data len {len(klines_df)}")
         self.clickhouse.save_dataframe(table.__tablename__, klines_df)
 
+    def __fetch_single_kline(
+        self,
+        code,
+        symbol_onboard_date,
+        latest_klines_df,
+        table,
+        interval,
+        interval_seconds,
+        limit_seconds,
+        signal,
+        slow_down_seconds,
+    ):
+        latest_record = latest_klines_df.filter(pl.col("code") == code)
+        lastest_record = (
+            latest_record[0, "datetime"]
+            if len(latest_record) > 0
+            else self.clickhouse.data_start
+        )
+        lastest_record = max(
+            lastest_record,
+            datetime.fromtimestamp(symbol_onboard_date / 1000),
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+        if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
+            local_klines_df = self.crypto_db.load_history_data(
+                code,
+                lastest_record,
+                signal,
+                timeframe=interval,
+                httpx_proxies={
+                    "https": f"http://{self.proxy_host}:{self.proxy_port}"
+                },
+            )
+            self.clickhouse.save_to_db(
+                table, local_klines_df.to_pandas(), table.code == code
+            )
+            lastest_record = self.clickhouse.get_latest_record_time(
+                table, table.code == code
+            )
+            data_duration_seconds = (signal - lastest_record).total_seconds()
+
+        if data_duration_seconds < interval_seconds:
+            return None
+
+        startTime = datetime2utctimestamp_milli(lastest_record)
+        try:
+            klines_list = self.data_proxy.um_future_klines(
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
+            )
+            if not klines_list:
+                klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
+        except Exception as e:
+            logger.error(f"futures helper sync kline failed for {code}: {e}")
+            return None
+
+        cols = list(table().get_colcom_names().values())[1:] + ["stub"]
+        klines_df = pd.DataFrame(klines_list, columns=cols)
+        klines_df["code"] = code
+        klines_df["open_time"] = klines_df["open_time"].apply(utcstamp_mill2datetime)
+        klines_df["close_time"] = klines_df["close_time"].apply(utcstamp_mill2datetime)
+        klines_df = klines_df[
+            klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
+        ]
+        klines_df = klines_df.drop_duplicates(subset=["close_time"])
+        return klines_df
+
     def __sync_futures_kline(
         self,
         signal,
@@ -410,76 +481,39 @@ class FuturesHelper:
         )
         latest_klines_df = pl.from_pandas(latest_klines_df)
         klines_dfs = []
-        for symbol in symbols:
-            code = symbol["pair"]
-            latest_record = latest_klines_df.filter(pl.col("code") == code)
-            lastest_record = (
-                latest_record[0, "datetime"]
-                if len(latest_record) > 0
-                else self.clickhouse.data_start
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-            # load history data and save into db
-            if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
-                local_klines_df = self.crypto_db.load_history_data(
-                    code,
-                    lastest_record,
-                    signal,
-                    timeframe=interval,
-                    httpx_proxies={
-                        "https": f"http://{self.proxy_host}:{self.proxy_port}"
-                    },
-                )
-                self.clickhouse.save_to_db(
-                    table, local_klines_df.to_pandas(), table.code == code
-                )
-                # refresh data duration
-                lastest_record = self.clickhouse.get_latest_record_time(
-                    table, table.code == code
-                )
-                data_duration_seconds = (signal - lastest_record).total_seconds()
 
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync kline ignore too short duration {lastest_record}-{signal}"
-                    )
-                continue
-
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                klines_list = self.data_proxy.um_future_klines(
+        inner_workers = min(len(symbols), 10)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_kline,
                     code,
-                    "PERPETUAL",
+                    symbol["onboardDate"],
+                    latest_klines_df,
+                    table,
                     interval,
-                    startTime=startTime,
-                    limit=1000,
+                    interval_seconds,
+                    limit_seconds,
+                    signal,
+                    slow_down_seconds,
                 )
-                if not klines_list:
-                    # generate stub kline to mark latest sync time.
-                    klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
-            except Exception as e:
-                logger.error(f"futures helper sync kline failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())[1:] + ["stub"]
-            klines_df = pd.DataFrame(klines_list, columns=cols)
-            klines_df["code"] = code
-            klines_df["open_time"] = klines_df["open_time"].apply(
-                utcstamp_mill2datetime
-            )
-            klines_df["close_time"] = klines_df["close_time"].apply(
-                utcstamp_mill2datetime
-            )
-            klines_df = klines_df[
-                klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
-            ]
-            klines_df = klines_df.drop_duplicates(subset=["close_time"])
-            klines_dfs.append(klines_df)
-            if slow_down_seconds > 0:
-                time.sleep(slow_down_seconds)
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        klines_dfs.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync kline inner task failed for {code}: {e}"
+                    )
+
         if klines_dfs:
             merged_df = pd.concat(klines_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
