@@ -365,8 +365,27 @@ class FuturesHelper:
             if count_df is None or count_df.empty:
                 return False
             lastest_count = count_df.iloc[0]["cnt"]
-            if lastest_count < request_count - allow_missing_count:
+            lastest_time = count_df.iloc[0]["datetime"]
+            # 校验 1: 最新时间与 signal 相差不超过 2 个 interval
+            time_gap = abs((signal - lastest_time).total_seconds())
+            max_allowed_gap = timeframe2minutes(interval) * 60 * 2
+            if time_gap > max_allowed_gap:
+                logger.warning(
+                    f"{what} latest time {lastest_time} too far from signal {signal}, "
+                    f"gap={time_gap:.0f}s > {max_allowed_gap}s"
+                )
                 return False
+            # 校验 2: 数据量足够
+            if lastest_count < request_count - allow_missing_count:
+                logger.warning(
+                    f"{what} count {lastest_count} < {request_count - allow_missing_count}, "
+                    f"missing={request_count - lastest_count}"
+                )
+                return False
+            logger.info(
+                f"{what} verified OK: datetime={lastest_time}, "
+                f"count={lastest_count}/{request_count}"
+            )
         return True
 
     def save_klines_from_ws(self, interval):

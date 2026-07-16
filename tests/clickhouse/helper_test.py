@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import polars as pl
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from pond.clickhouse.helper import FuturesHelper
 from pond.clickhouse.kline import (
@@ -250,10 +250,16 @@ class TestGetPerpetualSymbols:
 # ------------------------------------------------------------------------
 
 class TestSyncKline:
-    def test_success(self, helper, mock_clickhouse):
+    def _mock_vrf(self, mock_clickhouse, cnt, dt=None):
+        """helper: mock 验证查询返回 (datetime, cnt) — 统一用 UTC"""
+        if dt is None:
+            dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
-            {"cnt": [3]}
+            {"datetime": [dt], "cnt": [cnt]}
         )
+
+    def test_success(self, helper, mock_clickhouse):
+        self._mock_vrf(mock_clickhouse, cnt=3)
         assert helper.sync_futures_kline("1h", workers=3) is True
         assert mock_clickhouse.save_to_db.called
 
@@ -263,16 +269,17 @@ class TestSyncKline:
         assert not mock_clickhouse.save_to_db.called
 
     def test_verification_fails_when_count_is_low(self, helper, mock_clickhouse):
-        mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
-            {"cnt": [0]}
-        )
+        self._mock_vrf(mock_clickhouse, cnt=0)
         assert helper.sync_futures_kline("1h", workers=3) is False
 
     def test_allow_missing_count_tolerates_gaps(self, helper, mock_clickhouse):
-        mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
-            {"cnt": [2]}
-        )
+        self._mock_vrf(mock_clickhouse, cnt=2)
         assert helper.sync("1h", workers=3, what="kline", allow_missing_count=1) is True
+
+    def test_verification_fails_when_time_too_old(self, helper, mock_clickhouse):
+        self._mock_vrf(mock_clickhouse, cnt=3,
+                       dt=datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(hours=3))
+        assert helper.sync_futures_kline("1h", workers=3) is False
 
     def test_verification_returns_empty_df(self, helper, mock_clickhouse):
         mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame()
@@ -290,7 +297,7 @@ class TestSyncKline:
 class TestSyncFundingRate:
     def test_success(self, helper, mock_clickhouse):
         mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
-            {"cnt": [3]}
+            {"datetime": [datetime.now(tz=timezone.utc).replace(tzinfo=None)], "cnt": [3]}
         )
         assert helper.sync("1h", workers=3, what="funding_rate") is True
         assert mock_clickhouse.save_to_db.called
