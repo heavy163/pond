@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from loguru import logger
@@ -56,8 +56,10 @@ def _make_conn_str(http_port=8123, native_port=9000):
 
 SYNC_TYPES = ["kline", "funding_rate"]
 INTERVAL = "1h"
-# data_start = 今天 00:00 UTC，避免拉取过多历史数据
-TODAY_0_UTC = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+# data_start = 今天 00:00 UTC（注意：必须用 UTC 时间，不是本地时间），避免拉取过多历史数据
+TODAY_UTC_0 = datetime.now(tz=timezone.utc).replace(
+    hour=0, minute=0, second=0, microsecond=0
+).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,7 @@ conn_str, native_conn_str = _make_conn_str()
 try:
     manager = ClickHouseManager(
         conn_str,
-        data_start=TODAY_0_UTC,  # data_start 控制拉取起点 = 今天 00:00
+        data_start=TODAY_UTC_0,  # data_start 控制拉取起点 = 今天 00:00
         native_uri=native_conn_str,
     )
     result = manager.native_sql_read_table("SELECT 1 AS t")
@@ -162,7 +164,7 @@ print()
 print("=" * 60)
 print("真实数据同步测试完成")
 print(f"  ClickHouse:   {CLICKHOUSE_HOST} / {CLICKHOUSE_DB}")
-print(f"  data_start:   {TODAY_0_UTC}  (控制拉取起点)")
+print(f"  data_start:   {TODAY_UTC_0}  (控制拉取起点)")
 print(f"  signal:       datetime.now() (默认, 验证窗口正确)")
 print(f"  Kline:        {'OK' if results.get('kline') else 'FAIL'}")
 print(f"  Funding Rate: {'OK' if results.get('funding_rate') else 'FAIL'}")
