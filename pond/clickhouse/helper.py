@@ -317,14 +317,13 @@ class FuturesHelper:
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
-            time_col = "close_time" if what == "kline" else "fundingTime"
             start = signal - timedelta(minutes=timeframe2minutes(interval) * 2)
             sql = f"""
-                SELECT {time_col}, count(*) AS cnt
+                SELECT datetime, count(*) AS cnt
                 FROM {table.__tablename__}
-                WHERE {time_col} >= %(start)s AND {time_col} <= %(end)s
-                GROUP BY {time_col}
-                ORDER BY {time_col} DESC
+                WHERE datetime >= %(start)s AND datetime <= %(end)s
+                GROUP BY datetime
+                ORDER BY datetime DESC
                 LIMIT 1
             """
             count_df = self.clickhouse.native_sql_read_table(
