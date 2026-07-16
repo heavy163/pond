@@ -541,11 +541,18 @@ class FuturesHelper:
                 future_map[future] = code
 
             for future in concurrent.futures.as_completed(future_map):
+                if _banned.is_set():
+                    # 已触发限流，取消剩余任务
+                    for f in future_map:
+                        f.cancel()
+                    break
                 code = future_map[future]
                 try:
                     result = future.result()
                     if result is not None:
                         klines_dfs.append(result)
+                except concurrent.futures.CancelledError:
+                    pass
                 except Exception as e:
                     logger.error(
                         f"futures helper sync kline task failed for {code}: {e}"
@@ -1189,11 +1196,12 @@ if __name__ == "__main__":
     while not ret:
         ret = helper.sync(
             interval,
-            workers=3,
+            workers=1,
             end_time=end_time,
             what="kline",
             slow_down_seconds=0.01,
         )
+        time.sleep(60)
         print(f"sync ret {ret}")
 
     # helper.subscribe_futures(interval)
