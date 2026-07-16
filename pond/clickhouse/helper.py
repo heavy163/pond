@@ -369,7 +369,7 @@ class FuturesHelper:
         self,
         code,
         symbol_onboard_date,
-        latest_klines_df,
+        latest_records_map,
         table,
         interval,
         interval_seconds,
@@ -377,12 +377,7 @@ class FuturesHelper:
         signal,
         slow_down_seconds,
     ):
-        latest_record = latest_klines_df.filter(pl.col("code") == code)
-        lastest_record = (
-            latest_record[0, "datetime"]
-            if len(latest_record) > 0
-            else self.clickhouse.data_start
-        )
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
         lastest_record = max(
             lastest_record,
             datetime.fromtimestamp(symbol_onboard_date / 1000),
@@ -454,7 +449,11 @@ class FuturesHelper:
         latest_klines_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        latest_klines_df = pl.from_pandas(latest_klines_df)
+        latest_records_map = {}
+        if latest_klines_df is not None and not latest_klines_df.empty:
+            for _, row in latest_klines_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
+
         klines_dfs = []
 
         inner_workers = min(len(symbols), 10)
@@ -468,7 +467,7 @@ class FuturesHelper:
                     self.__fetch_single_kline,
                     code,
                     symbol["onboardDate"],
-                    latest_klines_df,
+                    latest_records_map,
                     table,
                     interval,
                     interval_seconds,
