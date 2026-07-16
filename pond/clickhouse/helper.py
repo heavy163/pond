@@ -727,6 +727,50 @@ class FuturesHelper:
             count += 1
         res_dict[tid] = count == len(symbols)
 
+    def __fetch_single_funding_rate(
+        self,
+        code,
+        symbol_onboard_date,
+        table,
+        interval,
+        interval_seconds,
+        signal,
+        latest_records_map,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(symbol_onboard_date / 1000)
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+
+        if data_duration_seconds < interval_seconds:
+            return None
+        startTime = datetime2utctimestamp_milli(lastest_record)
+        try:
+            funding_list = self.data_proxy.um_future_funding_rate(
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
+            )
+            if not funding_list or len(funding_list) == 0:
+                return None
+        except Exception as e:
+            logger.error(f"futures helper sync funding rate for {code} failed {e}")
+            return None
+        cols = list(table().get_colcom_names().values())
+        funding_rate_df = pd.DataFrame(funding_list, columns=cols)
+        funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
+            "Float64"
+        )
+        funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
+        funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
+            utcstamp_mill2datetime
+        )
+        funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
+        return funding_rate_df
+
     def __sync_futures_funding_rate(
         self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict
     ):
@@ -746,46 +790,40 @@ class FuturesHelper:
         except Exception as e:
             logger.error(f"futures helper sync funding_rate batch query failed {e}")
 
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                continue
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                funding_list = self.data_proxy.um_future_funding_rate(
+        funding_dfs = []
+        inner_workers = min(len(symbols), 10)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_funding_rate,
                     code,
-                    "PERPETUAL",
+                    symbol["onboardDate"],
+                    table,
                     interval,
-                    startTime=startTime,
-                    limit=1000,
+                    interval_seconds,
+                    signal,
+                    latest_records_map,
                 )
-                if not funding_list or len(funding_list) == 0:
-                    continue
-            except Exception as e:
-                logger.error(f"futures helper sync funding rate for {code} failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())
-            funding_rate_df = pd.DataFrame(funding_list, columns=cols)
-            funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
-                "Float64"
-            )
-            funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
-            funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
-                utcstamp_mill2datetime
-            )
-            funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
-            self.clickhouse.save_to_db(table, funding_rate_df, table.code == code)
-            time.sleep(0.01)
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        funding_dfs.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync funding rate inner task failed for {code}: {e}"
+                    )
+
+        if funding_dfs:
+            merged_df = pd.concat(funding_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = True
 
     def __sync_futures_extra_info(
