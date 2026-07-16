@@ -585,6 +585,7 @@ class FuturesHelper:
         )
         holders_df = pl.from_pandas(holders_df)
         synced_count = 0
+        all_holders_dfs = []
         for symbol in symbols:
             code = symbol["pair"]
             base_asset = symbol["baseAsset"]
@@ -647,11 +648,13 @@ class FuturesHelper:
                 logger.error(f"futures helper sync holders for {code} failed {e}")
                 continue
             if len(holders_dfs) > 0:
-                result_df = pd.concat(holders_dfs)
-                self.clickhouse.save_to_db(
-                    table, result_df, table.code == code, drop_duplicates=False
-                )
+                all_holders_dfs.extend(holders_dfs)
             synced_count += 1
+        if all_holders_dfs:
+            merged_df = pd.concat(all_holders_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(
+                table, merged_df, None, drop_duplicates=False
+            )
         res_dict[tid] = synced_count == len(symbols)
 
     def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict):
@@ -663,6 +666,7 @@ class FuturesHelper:
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
         info_df = pl.from_pandas(info_df)
+        info_dfs = []
         count = 0
         for symbol in symbols:
             code = symbol["pair"]
@@ -693,8 +697,7 @@ class FuturesHelper:
                 logger.warning(
                     f"futures helper sync info can not find coin gecko id for {code}"
                 )
-                self.clickhouse.save_to_db(
-                    table,
+                info_dfs.append(
                     pd.DataFrame(
                         {
                             "datetime": [signal],
@@ -702,8 +705,7 @@ class FuturesHelper:
                             "total_supply": None,
                             "market_cap_fdv_ratio": None,
                         }
-                    ),
-                    table.code == code,
+                    )
                 )
                 count += 1
                 continue
@@ -712,8 +714,7 @@ class FuturesHelper:
                 continue
             total_supply = data.get("total_supply", None)
             market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
-            self.clickhouse.save_to_db(
-                table,
+            info_dfs.append(
                 pd.DataFrame(
                     {
                         "datetime": [signal],
@@ -721,10 +722,12 @@ class FuturesHelper:
                         "total_supply": [total_supply],
                         "market_cap_fdv_ratio": [market_cap_fdv_ratio],
                     }
-                ),
-                table.code == code,
+                )
             )
             count += 1
+        if info_dfs:
+            merged_df = pd.concat(info_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = count == len(symbols)
 
     def __fetch_single_funding_rate(
