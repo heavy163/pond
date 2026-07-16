@@ -7,6 +7,7 @@ from typing import Optional
 import datetime as dtm
 from datetime import datetime
 import time
+import traceback
 import polars as pl
 import aiohttp
 from binance.um_futures import UMFutures
@@ -403,16 +404,16 @@ class FuturesHelper:
             # ClickHouse 返回本地时间 (Asia/Shanghai UTC+8), signal 可能为本地或 UTC
             # 统一转 UTC 后比较: local + time.timezone = UTC
             _west = time.timezone  # UTC+8 → -28800
-            _lastest_utc = lastest_time - dtm.timedelta(seconds=_west)
+            _lastest_utc = lastest_time + dtm.timedelta(seconds=_west)
             _signal_utc = (
-                signal if _end_time_is_set else (signal + dtm.timedelta(seconds=_west))
+                signal + dtm.timedelta(seconds=_west) if _end_time_is_set else signal
             )
             time_gap = abs((_signal_utc - _lastest_utc).total_seconds())
             max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(
-                    f"{what} latest time {lastest_time} too far from signal {signal}, "
-                    f"gap={time_gap:.0f}s > {max_allowed_gap}s"
+                f"{what} latest time {lastest_time} too far from signal {signal}, "
+                f"gap={time_gap:.0f}s > {max_allowed_gap}s"
                 )
                 return False
             # 校验 2: 数据量足够
@@ -530,7 +531,10 @@ class FuturesHelper:
             if not klines_list:
                 klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
         except Exception as e:
-            logger.error(f"futures helper sync kline failed for {code}: {e}")
+            logger.error(
+                f"futures helper sync kline failed for {code}: {e}\n"
+                f"{traceback.format_exc()}"
+            )
             return None
 
         cols = list(table().get_colcom_names().values())[1:] + ["stub"]
@@ -593,7 +597,10 @@ class FuturesHelper:
             if not klines_list:
                 klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
         except Exception as e:
-            logger.error(f"futures helper sync kline failed for {code}: {e}")
+            logger.error(
+                f"futures helper sync kline async failed for {code}: {e}\n"
+                f"{traceback.format_exc()}"
+            )
             return None
 
         cols = list(table().get_colcom_names().values())[1:] + ["stub"]
@@ -897,7 +904,10 @@ class FuturesHelper:
             if not funding_list or len(funding_list) == 0:
                 return None
         except Exception as e:
-            logger.error(f"futures helper sync funding rate for {code} failed {e}")
+            logger.error(
+                f"futures helper sync funding rate for {code} failed {e}\n"
+                f"{traceback.format_exc()}"
+            )
             return None
         cols = list(table().get_colcom_names().values())
         funding_rate_df = pd.DataFrame(funding_list, columns=cols)
@@ -941,7 +951,10 @@ class FuturesHelper:
             if not funding_list or len(funding_list) == 0:
                 return None
         except Exception as e:
-            logger.error(f"futures helper sync funding rate for {code} failed {e}")
+            logger.error(
+                f"futures helper sync funding rate async failed for {code}: {e}\n"
+                f"{traceback.format_exc()}"
+            )
             return None
         cols = list(table().get_colcom_names().values())
         funding_rate_df = pd.DataFrame(funding_list, columns=cols)
