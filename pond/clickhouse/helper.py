@@ -518,60 +518,6 @@ class FuturesHelper:
             self.clickhouse.save_to_db(table, merged_df, None)
         res_dict[tid] = True
 
-    def __sync_futures_funding_rate(
-        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict
-    ):
-        tid = threading.current_thread().ident
-        res_dict[tid] = False
-        interval_seconds = timeframe2minutes(interval) * 60
-        if signal is None:
-            signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                continue
-            logger.info(
-                f"futures helper sync funding rate for {code}, lastest record is {lastest_record}, signal {signal}"
-            )
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                funding_list = self.data_proxy.um_future_funding_rate(
-                    code,
-                    "PERPETUAL",
-                    interval,
-                    startTime=startTime,
-                    limit=1000,
-                )
-                if not funding_list or len(funding_list) == 0:
-                    continue
-            except Exception as e:
-                logger.error(f"futures helper sync funding rate for {code} failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())
-            funding_rate_df = pd.DataFrame(funding_list, columns=cols)
-            funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
-                "Float64"
-            )
-            funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
-            funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
-                utcstamp_mill2datetime
-            )
-            funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
-            self.clickhouse.save_to_db(table, funding_rate_df, table.code == code)
-        res_dict[tid] = True
-
     def __sync_futures_base_asset_holders(
         self, table: TokenHolders, symbols, interval, res_dict: dict
     ):
