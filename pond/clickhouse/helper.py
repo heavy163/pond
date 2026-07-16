@@ -1,5 +1,6 @@
 import os
 import math
+import asyncio
 import concurrent.futures
 from pond.clickhouse.manager import ClickHouseManager
 from typing import Optional
@@ -7,6 +8,7 @@ import datetime as dtm
 from datetime import datetime
 import time
 import polars as pl
+import aiohttp
 from binance.um_futures import UMFutures
 from pond.clickhouse.kline import (
     FutureInfo,
@@ -107,6 +109,70 @@ class DirectDataProxy(DataProxy):
         return self.exchange.funding_rate(symbol, startTime=startTime, limit=limit)
 
 
+class AsyncDirectDataProxy(DataProxy):
+    base_url = "https://fapi.binance.com"
+    _session = None
+    _session_lock = threading.Lock()
+    _exchange_info_cache = None
+    _exchange_info_cache_time = None
+
+    async def _get_session(self):
+        if self._session is None or self._session.closed:
+            self._session_lock.acquire()
+            try:
+                if self._session is None or self._session.closed:
+                    connector = aiohttp.TCPConnector(limit=20)
+                    self._session = aiohttp.ClientSession(
+                        self.base_url, connector=connector
+                    )
+            finally:
+                self._session_lock.release()
+        return self._session
+
+    async def um_future_exchange_info(self) -> dict:
+        current_time = time.time()
+        if (
+            self._exchange_info_cache is not None
+            and self._exchange_info_cache_time is not None
+            and current_time - self._exchange_info_cache_time < 24 * 60 * 60
+        ):
+            return self._exchange_info_cache
+        session = await self._get_session()
+        async with session.get("/fapi/v1/exchangeInfo") as resp:
+            data = await resp.json(encoding="utf-8")
+        self._exchange_info_cache = data
+        self._exchange_info_cache_time = current_time
+        return data
+
+    async def um_future_klines(
+        self, symbol, contract_type, interval, startTime, limit
+    ) -> list:
+        session = await self._get_session()
+        params = {
+            "pair": symbol,
+            "contractType": contract_type,
+            "interval": interval,
+            "startTime": startTime,
+            "limit": limit,
+        }
+        async with session.get("/fapi/v1/continuousKlines", params=params) as resp:
+            return await resp.json(encoding="utf-8")
+
+    async def um_future_funding_rate(self, symbol, contract_type, interval, startTime, limit):
+        session = await self._get_session()
+        params = {
+            "symbol": symbol,
+            "startTime": startTime,
+            "limit": limit,
+        }
+        async with session.get("/fapi/v1/fundingRate", params=params) as resp:
+            return await resp.json(encoding="utf-8")
+
+    async def close(self):
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+
+
 class FuturesHelper:
     crypto_db: CryptoDB = None
     clickhouse: ClickHouseManager = None
@@ -134,6 +200,7 @@ class FuturesHelper:
         self.configs = kwargs
         self.data_proxy = DirectDataProxy()
         self.fix_kline_with_cryptodb = fix_kline_with_cryptodb
+        self.async_data_proxy = AsyncDirectDataProxy()
         api_key = kwargs.get(
             "CHAIN_BASE_API_KEY", os.environ.get("CHAIN_BASE_API_KEY", None)
         )
@@ -430,6 +497,71 @@ class FuturesHelper:
         klines_df = klines_df.drop_duplicates(subset=["close_time"])
         return klines_df
 
+    async def __async_fetch_single_kline(
+        self,
+        code,
+        symbol_onboard_date,
+        latest_records_map,
+        table,
+        interval,
+        interval_seconds,
+        limit_seconds,
+        signal,
+        slow_down_seconds,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record,
+            datetime.fromtimestamp(symbol_onboard_date / 1000),
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+        if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
+            local_klines_df = self.crypto_db.load_history_data(
+                code,
+                lastest_record,
+                signal,
+                timeframe=interval,
+                httpx_proxies={
+                    "https": f"http://{self.proxy_host}:{self.proxy_port}"
+                },
+            )
+            self.clickhouse.save_to_db(
+                table, local_klines_df.to_pandas(), table.code == code
+            )
+            lastest_record = self.clickhouse.get_latest_record_time(
+                table, table.code == code
+            )
+            data_duration_seconds = (signal - lastest_record).total_seconds()
+
+        if data_duration_seconds < interval_seconds:
+            return None
+
+        startTime = datetime2utctimestamp_milli(lastest_record)
+        try:
+            klines_list = await self.async_data_proxy.um_future_klines(
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
+            )
+            if not klines_list:
+                klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
+        except Exception as e:
+            logger.error(f"futures helper sync kline failed for {code}: {e}")
+            return None
+
+        cols = list(table().get_colcom_names().values())[1:] + ["stub"]
+        klines_df = pd.DataFrame(klines_list, columns=cols)
+        klines_df["code"] = code
+        klines_df["open_time"] = klines_df["open_time"].apply(utcstamp_mill2datetime)
+        klines_df["close_time"] = klines_df["close_time"].apply(utcstamp_mill2datetime)
+        klines_df = klines_df[
+            klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
+        ]
+        klines_df = klines_df.drop_duplicates(subset=["close_time"])
+        return klines_df
+
     def __sync_futures_kline(
         self,
         signal,
@@ -454,39 +586,36 @@ class FuturesHelper:
             for _, row in latest_klines_df.iterrows():
                 latest_records_map[row["code"]] = row["datetime"]
 
-        klines_dfs = []
-
-        inner_workers = min(len(symbols), 10)
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=inner_workers
-        ) as executor:
-            future_map = {}
+        async def _run_async():
+            tasks = []
             for symbol in symbols:
                 code = symbol["pair"]
-                future = executor.submit(
-                    self.__fetch_single_kline,
-                    code,
-                    symbol["onboardDate"],
-                    latest_records_map,
-                    table,
-                    interval,
-                    interval_seconds,
-                    limit_seconds,
-                    signal,
-                    slow_down_seconds,
-                )
-                future_map[future] = code
-
-            for future in concurrent.futures.as_completed(future_map):
-                code = future_map[future]
-                try:
-                    result = future.result()
-                    if result is not None:
-                        klines_dfs.append(result)
-                except Exception as e:
-                    logger.error(
-                        f"futures helper sync kline inner task failed for {code}: {e}"
+                tasks.append(
+                    self.__async_fetch_single_kline(
+                        code,
+                        symbol["onboardDate"],
+                        latest_records_map,
+                        table,
+                        interval,
+                        interval_seconds,
+                        limit_seconds,
+                        signal,
+                        slow_down_seconds,
                     )
+                )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            klines_dfs = []
+            for i, result in enumerate(results):
+                code = symbols[i]["pair"]
+                if isinstance(result, Exception):
+                    logger.error(
+                        f"futures helper sync kline async task failed for {code}: {result}"
+                    )
+                elif result is not None:
+                    klines_dfs.append(result)
+            return klines_dfs
+
+        klines_dfs = asyncio.run(_run_async())
 
         if klines_dfs:
             merged_df = pd.concat(klines_dfs, ignore_index=True)
