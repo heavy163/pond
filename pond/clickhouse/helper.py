@@ -110,24 +110,15 @@ class DirectDataProxy(DataProxy):
 
 
 class AsyncDirectDataProxy(DataProxy):
+    """异步 Binance API 代理。
+
+    每个请求方法使用独立的 ``aiohttp.ClientSession`` (通过 ``async with`` 创建)，
+    因此可以安全地在不同线程的 ``asyncio.run()`` 中调用，
+    不会出现跨事件循环共享 session 的问题。
+    """
     base_url = "https://fapi.binance.com"
-    _session = None
-    _session_lock = threading.Lock()
     _exchange_info_cache = None
     _exchange_info_cache_time = None
-
-    async def _get_session(self):
-        if self._session is None or self._session.closed:
-            self._session_lock.acquire()
-            try:
-                if self._session is None or self._session.closed:
-                    connector = aiohttp.TCPConnector(limit=20)
-                    self._session = aiohttp.ClientSession(
-                        self.base_url, connector=connector
-                    )
-            finally:
-                self._session_lock.release()
-        return self._session
 
     async def um_future_exchange_info(self) -> dict:
         current_time = time.time()
@@ -137,9 +128,9 @@ class AsyncDirectDataProxy(DataProxy):
             and current_time - self._exchange_info_cache_time < 24 * 60 * 60
         ):
             return self._exchange_info_cache
-        session = await self._get_session()
-        async with session.get("/fapi/v1/exchangeInfo") as resp:
-            data = await resp.json(encoding="utf-8")
+        async with aiohttp.ClientSession(self.base_url) as session:
+            async with session.get("/fapi/v1/exchangeInfo") as resp:
+                data = await resp.json(encoding="utf-8")
         self._exchange_info_cache = data
         self._exchange_info_cache_time = current_time
         return data
@@ -147,7 +138,6 @@ class AsyncDirectDataProxy(DataProxy):
     async def um_future_klines(
         self, symbol, contract_type, interval, startTime, limit
     ) -> list:
-        session = await self._get_session()
         params = {
             "pair": symbol,
             "contractType": contract_type,
@@ -155,22 +145,22 @@ class AsyncDirectDataProxy(DataProxy):
             "startTime": startTime,
             "limit": limit,
         }
-        async with session.get("/fapi/v1/continuousKlines", params=params) as resp:
-            return await resp.json(encoding="utf-8")
+        async with aiohttp.ClientSession(self.base_url) as session:
+            async with session.get("/fapi/v1/continuousKlines", params=params) as resp:
+                return await resp.json(encoding="utf-8")
 
     async def um_future_funding_rate(self, symbol, contract_type, interval, startTime, limit):
-        session = await self._get_session()
         params = {
             "symbol": symbol,
             "startTime": startTime,
             "limit": limit,
         }
-        async with session.get("/fapi/v1/fundingRate", params=params) as resp:
-            return await resp.json(encoding="utf-8")
+        async with aiohttp.ClientSession(self.base_url) as session:
+            async with session.get("/fapi/v1/fundingRate", params=params) as resp:
+                return await resp.json(encoding="utf-8")
 
     async def close(self):
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        pass
 
 
 class FuturesHelper:
@@ -1248,7 +1238,7 @@ if __name__ == "__main__":
     while not ret:
         ret = helper.sync(
             interval,
-            workers=5,
+            workers=3,
             end_time=end_time,
             what="kline",
         )

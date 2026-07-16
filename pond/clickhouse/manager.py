@@ -52,21 +52,17 @@ class ClickHouseManager:
         metadata.create_all(self.engine)
         self.data_start = data_start
         self.native_uri = native_uri
-        self._native_client: Client | None = None
-        self._native_client_lock = threading.Lock()
+        self._thread_local = threading.local()
 
     def get_engine(self):
         return self.engine
 
     def _get_native_client(self) -> Client:
-        if self._native_client is None:
-            self._native_client_lock.acquire()
-            try:
-                if self._native_client is None:
-                    self._native_client = Client.from_url(self.native_uri)
-            finally:
-                self._native_client_lock.release()
-        return self._native_client
+        client = getattr(self._thread_local, 'native_client', None)
+        if client is None:
+            client = Client.from_url(self.native_uri)
+            self._thread_local.native_client = client
+        return client
 
     def create_client(self, db_uri: str):
         parts = urlparse(db_uri)
