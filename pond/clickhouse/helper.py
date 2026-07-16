@@ -116,6 +116,7 @@ class AsyncDirectDataProxy(DataProxy):
     因此可以安全地在不同线程的 ``asyncio.run()`` 中调用，
     不会出现跨事件循环共享 session 的问题。
     """
+
     base_url = "https://fapi.binance.com"
     _exchange_info_cache = None
     _exchange_info_cache_time = None
@@ -149,7 +150,9 @@ class AsyncDirectDataProxy(DataProxy):
             async with session.get("/fapi/v1/continuousKlines", params=params) as resp:
                 return await resp.json(encoding="utf-8")
 
-    async def um_future_funding_rate(self, symbol, contract_type, interval, startTime, limit):
+    async def um_future_funding_rate(
+        self, symbol, contract_type, interval, startTime, limit
+    ):
         params = {
             "symbol": symbol,
             "startTime": startTime,
@@ -313,23 +316,52 @@ class FuturesHelper:
             worker_symbols = symbols[i * task_counts : (i + 1) * task_counts]
             if what == "kline":
                 sync_tasks.append(
-                    (self.__sync_futures_kline, (signal, table, worker_symbols, interval, res_dict, slow_down_seconds))
+                    (
+                        self.__sync_futures_kline,
+                        (
+                            signal,
+                            table,
+                            worker_symbols,
+                            interval,
+                            res_dict,
+                            slow_down_seconds,
+                        ),
+                    )
                 )
             elif what == "info":
                 sync_tasks.append(
-                    (self.__sync_futures_info, (signal, table, worker_symbols, res_dict))
+                    (
+                        self.__sync_futures_info,
+                        (signal, table, worker_symbols, res_dict),
+                    )
                 )
             elif what == "funding_rate":
                 sync_tasks.append(
-                    (self.__sync_futures_funding_rate, (signal, table, worker_symbols, interval, res_dict))
+                    (
+                        self.__sync_futures_funding_rate,
+                        (signal, table, worker_symbols, interval, res_dict),
+                    )
                 )
             elif what == "holders":
                 sync_tasks.append(
-                    (self.__sync_futures_base_asset_holders, (table, worker_symbols, interval, res_dict))
+                    (
+                        self.__sync_futures_base_asset_holders,
+                        (table, worker_symbols, interval, res_dict),
+                    )
                 )
             else:
                 sync_tasks.append(
-                    (self.__sync_futures_extra_info, (what, signal, worker_symbols, interval, allow_missing_count, res_dict))
+                    (
+                        self.__sync_futures_extra_info,
+                        (
+                            what,
+                            signal,
+                            worker_symbols,
+                            interval,
+                            allow_missing_count,
+                            res_dict,
+                        ),
+                    )
                 )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -350,7 +382,7 @@ class FuturesHelper:
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
-            start = signal - timedelta(minutes=timeframe2minutes(interval) * 2)
+            start = signal - timedelta(days=1)
             sql = f"""
                 SELECT datetime, count(*) AS cnt
                 FROM {table.__tablename__}
@@ -366,9 +398,9 @@ class FuturesHelper:
                 return False
             lastest_count = count_df.iloc[0]["cnt"]
             lastest_time = count_df.iloc[0]["datetime"]
-            # 校验 1: 最新时间与 signal 相差不超过 2 个 interval
+            # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval，否则数据已过期
             time_gap = abs((signal - lastest_time).total_seconds())
-            max_allowed_gap = timeframe2minutes(interval) * 60 * 2
+            max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(
                     f"{what} latest time {lastest_time} too far from signal {signal}, "
@@ -465,9 +497,7 @@ class FuturesHelper:
                 lastest_record,
                 signal,
                 timeframe=interval,
-                httpx_proxies={
-                    "https": f"http://{self.proxy_host}:{self.proxy_port}"
-                },
+                httpx_proxies={"https": f"http://{self.proxy_host}:{self.proxy_port}"},
             )
             self.clickhouse.save_to_db(
                 table, local_klines_df.to_pandas(), table.code == code
@@ -530,9 +560,7 @@ class FuturesHelper:
                 lastest_record,
                 signal,
                 timeframe=interval,
-                httpx_proxies={
-                    "https": f"http://{self.proxy_host}:{self.proxy_port}"
-                },
+                httpx_proxies={"https": f"http://{self.proxy_host}:{self.proxy_port}"},
             )
             self.clickhouse.save_to_db(
                 table, local_klines_df.to_pandas(), table.code == code
@@ -632,7 +660,13 @@ class FuturesHelper:
         res_dict[tid] = True
 
     def __fetch_single_holders(
-        self, signal, code, base_asset, onboard_date, interval_seconds, latest_records_map
+        self,
+        signal,
+        code,
+        base_asset,
+        onboard_date,
+        interval_seconds,
+        latest_records_map,
     ):
         lastest_record = latest_records_map.get(code)
         if lastest_record is not None:
@@ -642,9 +676,7 @@ class FuturesHelper:
             if lastest_record + timedelta(seconds=interval_seconds) > signal:
                 return "skip", None
         try:
-            cg_id = self.gecko_id_mapper.get_coingecko_id(
-                base_asset, exact_match=True
-            )
+            cg_id = self.gecko_id_mapper.get_coingecko_id(base_asset, exact_match=True)
             if cg_id is None:
                 return "error", None
             if cg_id == "":
@@ -702,8 +734,12 @@ class FuturesHelper:
                 code = symbol["pair"]
                 future = executor.submit(
                     self.__fetch_single_holders,
-                    signal, code, symbol["baseAsset"],
-                    symbol["onboardDate"], interval_seconds, latest_records_map,
+                    signal,
+                    code,
+                    symbol["baseAsset"],
+                    symbol["onboardDate"],
+                    interval_seconds,
+                    latest_records_map,
                 )
                 future_map[future] = code
 
@@ -728,13 +764,15 @@ class FuturesHelper:
 
         if all_holders_dfs:
             merged_df = pd.concat(all_holders_dfs, ignore_index=True)
-            self.clickhouse.save_to_db(
-                table, merged_df, None, drop_duplicates=False
-            )
+            self.clickhouse.save_to_db(table, merged_df, None, drop_duplicates=False)
         res_dict[tid] = synced_count == len(symbols)
 
     def __fetch_single_info(
-        self, signal, code, onboard_date, latest_records_map,
+        self,
+        signal,
+        code,
+        onboard_date,
+        latest_records_map,
     ):
         lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
         lastest_record = max(
@@ -792,7 +830,10 @@ class FuturesHelper:
                 code = symbol["pair"]
                 future = executor.submit(
                     self.__fetch_single_info,
-                    signal, code, symbol["onboardDate"], latest_records_map,
+                    signal,
+                    code,
+                    symbol["onboardDate"],
+                    latest_records_map,
                 )
                 future_map[future] = code
 
@@ -863,7 +904,14 @@ class FuturesHelper:
         return funding_rate_df
 
     async def __async_fetch_single_funding_rate(
-        self, code, symbol_onboard_date, table, interval, interval_seconds, signal, latest_records_map,
+        self,
+        code,
+        symbol_onboard_date,
+        table,
+        interval,
+        interval_seconds,
+        signal,
+        latest_records_map,
     ):
         lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
         lastest_record = max(
@@ -876,7 +924,11 @@ class FuturesHelper:
         startTime = datetime2utctimestamp_milli(lastest_record)
         try:
             funding_list = await self.async_data_proxy.um_future_funding_rate(
-                code, "PERPETUAL", interval, startTime=startTime, limit=1000,
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
             )
             if not funding_list or len(funding_list) == 0:
                 return None
@@ -885,9 +937,13 @@ class FuturesHelper:
             return None
         cols = list(table().get_colcom_names().values())
         funding_rate_df = pd.DataFrame(funding_list, columns=cols)
-        funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype("Float64")
+        funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
+            "Float64"
+        )
         funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
-        funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(utcstamp_mill2datetime)
+        funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
+            utcstamp_mill2datetime
+        )
         funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
         return funding_rate_df
 
@@ -913,8 +969,13 @@ class FuturesHelper:
         async def _run_async():
             tasks = [
                 self.__async_fetch_single_funding_rate(
-                    symbol["pair"], symbol["onboardDate"], table, interval,
-                    interval_seconds, signal, latest_records_map,
+                    symbol["pair"],
+                    symbol["onboardDate"],
+                    table,
+                    interval,
+                    interval_seconds,
+                    signal,
+                    latest_records_map,
                 )
                 for symbol in symbols
             ]
@@ -923,7 +984,9 @@ class FuturesHelper:
             for i, result in enumerate(results):
                 code = symbols[i]["pair"]
                 if isinstance(result, Exception):
-                    logger.error(f"futures helper sync funding rate async task failed for {code}: {result}")
+                    logger.error(
+                        f"futures helper sync funding rate async task failed for {code}: {result}"
+                    )
                 elif result is not None:
                     funding_dfs.append(result)
             return funding_dfs
