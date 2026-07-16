@@ -647,23 +647,27 @@ class FuturesHelper:
             for _, row in latest_klines_df.iterrows():
                 latest_records_map[row["code"]] = row["datetime"]
 
-        async def _run_async():
-            tasks = []
-            for symbol in symbols:
-                code = symbol["pair"]
-                tasks.append(
-                    self.__async_fetch_single_kline(
-                        code,
-                        symbol["onboardDate"],
-                        latest_records_map,
-                        table,
-                        interval,
-                        interval_seconds,
-                        limit_seconds,
-                        signal,
-                        slow_down_seconds,
-                    )
+        _sem = asyncio.Semaphore(20)
+        _need_slow = max(slow_down_seconds, 0)
+
+        async def _fetch_one(symbol):
+            async with _sem:
+                if _need_slow:
+                    await asyncio.sleep(_need_slow)
+                return await self.__async_fetch_single_kline(
+                    symbol["pair"],
+                    symbol["onboardDate"],
+                    latest_records_map,
+                    table,
+                    interval,
+                    interval_seconds,
+                    limit_seconds,
+                    signal,
+                    slow_down_seconds,
                 )
+
+        async def _run_async():
+            tasks = [_fetch_one(s) for s in symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             klines_dfs = []
             for i, result in enumerate(results):
@@ -996,9 +1000,11 @@ class FuturesHelper:
         except Exception as e:
             logger.error(f"futures helper sync funding_rate batch query failed {e}")
 
-        async def _run_async():
-            tasks = [
-                self.__async_fetch_single_funding_rate(
+        _sem = asyncio.Semaphore(20)
+
+        async def _fetch_one(symbol):
+            async with _sem:
+                return await self.__async_fetch_single_funding_rate(
                     symbol["pair"],
                     symbol["onboardDate"],
                     table,
@@ -1007,8 +1013,9 @@ class FuturesHelper:
                     signal,
                     latest_records_map,
                 )
-                for symbol in symbols
-            ]
+
+        async def _run_async():
+            tasks = [_fetch_one(s) for s in symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             funding_dfs = []
             for i, result in enumerate(results):
