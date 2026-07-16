@@ -56,6 +56,7 @@ def _make_conn_str(http_port=8123, native_port=9000):
 
 SYNC_TYPES = ["kline", "funding_rate"]
 INTERVAL = "1h"
+# data_start = 今天 00:00 UTC，避免拉取过多历史数据
 TODAY_0_UTC = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -69,7 +70,7 @@ conn_str, native_conn_str = _make_conn_str()
 try:
     manager = ClickHouseManager(
         conn_str,
-        data_start=TODAY_0_UTC - timedelta(days=1),
+        data_start=TODAY_0_UTC,  # data_start 控制拉取起点 = 今天 00:00
         native_uri=native_conn_str,
     )
     result = manager.native_sql_read_table("SELECT 1 AS t")
@@ -99,21 +100,22 @@ logger.info(f"Perpetual symbols: {len(symbols) if symbols else 0}")
 # ---------------------------------------------------------------------------
 # 同步数据
 # ---------------------------------------------------------------------------
-end_time = TODAY_0_UTC
+# 不传 end_time, signal 默认为 datetime.now(), 验证窗口能正确命中写入数据
+# data_start = 今天 00:00 控制 Binance API 拉取起点, 避免历史数据
 results = {}
 
 for what in SYNC_TYPES:
     workers = 2
     allow_missing = 50 if what not in ("kline", "funding_rate") else 0
 
-    logger.info(f"--- Syncing {what} interval={INTERVAL} end_time={end_time} ---")
+    logger.info(f"--- Syncing {what} interval={INTERVAL} ---")
 
     try:
-        ret = helper.sync(INTERVAL, workers=workers, end_time=end_time,
+        ret = helper.sync(INTERVAL, workers=workers,
                           what=what, allow_missing_count=allow_missing)
         results[what] = ret
         prefix = "SUCCEEDED" if ret else "FAILED"
-        logger.warning(f"sync {what} {prefix} (FAILED is expected for async workers)")
+        logger.warning(f"sync {what} {prefix}")
     except Exception as e:
         results[what] = False
         logger.error(f"sync {what} threw: {e}")
@@ -160,8 +162,8 @@ print()
 print("=" * 60)
 print("真实数据同步测试完成")
 print(f"  ClickHouse:   {CLICKHOUSE_HOST} / {CLICKHOUSE_DB}")
-print(f"  同步时间:     {TODAY_0_UTC}")
-print(f"  Kline:        {'FAIL (asyncio threading issue - known)' if not results.get('kline') else 'OK'}")
-print(f"  Funding Rate: 1871 rows written to ClickHouse (sync() returned False due to verification, but data persisted)")
-print(f"  预期行为:     async worker 内 asyncio.run() 与主线程 aiohttp 事件循环冲突")
+print(f"  data_start:   {TODAY_0_UTC}  (控制拉取起点)")
+print(f"  signal:       datetime.now() (默认, 验证窗口正确)")
+print(f"  Kline:        {'OK' if results.get('kline') else 'FAIL'}")
+print(f"  Funding Rate: {'OK' if results.get('funding_rate') else 'FAIL'}")
 print("=" * 60)

@@ -350,11 +350,7 @@ class FuturesHelper:
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
-            # 验证范围的上限使用当前时间 (而非 signal),
-            # 因为 __sync_futures_kline / funding_rate 写入的
-            # datetime 截止到 datetime.now()
-            verify_end = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
-            start = verify_end - timedelta(minutes=timeframe2minutes(interval) * 2)
+            start = signal - timedelta(minutes=timeframe2minutes(interval) * 2)
             sql = f"""
                 SELECT datetime, count(*) AS cnt
                 FROM {table.__tablename__}
@@ -364,7 +360,7 @@ class FuturesHelper:
                 LIMIT 1
             """
             count_df = self.clickhouse.native_sql_read_table(
-                sql, {"start": start, "end": verify_end}
+                sql, {"start": start, "end": signal}
             )
             if count_df is None or count_df.empty:
                 return False
