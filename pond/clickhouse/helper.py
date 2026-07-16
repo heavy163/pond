@@ -316,20 +316,22 @@ class FuturesHelper:
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
-            latest_kline_df = self.clickhouse.read_table(
-                table,
-                signal - timedelta(minutes=timeframe2minutes(interval) * 2),
-                signal,
-                filters=None,
-                rename=True,
-            )
-            if len(latest_kline_df) == 0:
-                return False
             time_col = "close_time" if what == "kline" else "fundingTime"
-            lastest_count = (
-                latest_kline_df.group_by(time_col).len().sort(time_col)[-1, "len"]
+            start = signal - timedelta(minutes=timeframe2minutes(interval) * 2)
+            sql = f"""
+                SELECT {time_col}, count(*) AS cnt
+                FROM {table.__tablename__}
+                WHERE {time_col} >= %(start)s AND {time_col} <= %(end)s
+                GROUP BY {time_col}
+                ORDER BY {time_col} DESC
+                LIMIT 1
+            """
+            count_df = self.clickhouse.native_sql_read_table(
+                sql, {"start": start, "end": signal}
             )
-            # allow 1 target data missing.
+            if count_df is None or count_df.empty:
+                return False
+            lastest_count = count_df.iloc[0]["cnt"]
             if lastest_count < request_count - allow_missing_count:
                 return False
         return True
