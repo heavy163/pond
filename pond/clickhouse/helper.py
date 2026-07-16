@@ -300,6 +300,7 @@ class FuturesHelper:
         slow_down_seconds: int = 0,
     ) -> bool:
         table = self.get_futures_table(interval, what)
+        _end_time_is_set = end_time is not None
         if end_time is not None:
             signal = end_time
         else:
@@ -398,8 +399,15 @@ class FuturesHelper:
                 return False
             lastest_count = count_df.iloc[0]["cnt"]
             lastest_time = count_df.iloc[0]["datetime"]
-            # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval，否则数据已过期
-            time_gap = abs((signal - lastest_time).total_seconds())
+            # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval
+            # ClickHouse 返回本地时间 (Asia/Shanghai UTC+8), signal 可能为本地或 UTC
+            # 统一转 UTC 后比较: local + time.timezone = UTC
+            _west = time.timezone  # UTC+8 → -28800
+            _lastest_utc = lastest_time - dtm.timedelta(seconds=_west)
+            _signal_utc = (
+                signal if _end_time_is_set else (signal + dtm.timedelta(seconds=_west))
+            )
+            time_gap = abs((_signal_utc - _lastest_utc).total_seconds())
             max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(

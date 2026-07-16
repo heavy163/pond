@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import polars as pl
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from pond.clickhouse.helper import FuturesHelper
 from pond.clickhouse.kline import (
@@ -251,9 +251,9 @@ class TestGetPerpetualSymbols:
 
 class TestSyncKline:
     def _mock_vrf(self, mock_clickhouse, cnt, dt=None):
-        """helper: mock 验证查询返回 (datetime, cnt) — 统一用 UTC"""
+        """helper: mock 验证查询返回 (datetime, cnt) — 模拟 ClickHouse 返回本地时间"""
         if dt is None:
-            dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+            dt = datetime.now()  # 本地时间 (ClickHouse 实际行为)
         mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
             {"datetime": [dt], "cnt": [cnt]}
         )
@@ -278,7 +278,7 @@ class TestSyncKline:
 
     def test_verification_fails_when_time_too_old(self, helper, mock_clickhouse):
         self._mock_vrf(mock_clickhouse, cnt=3,
-                       dt=datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(hours=3))
+                       dt=datetime.now() - timedelta(hours=3))  # 本地时间, 3h 前
         assert helper.sync_futures_kline("1h", workers=3) is False
 
     def test_verification_returns_empty_df(self, helper, mock_clickhouse):
@@ -297,7 +297,7 @@ class TestSyncKline:
 class TestSyncFundingRate:
     def test_success(self, helper, mock_clickhouse):
         mock_clickhouse.native_sql_read_table.return_value = pd.DataFrame(
-            {"datetime": [datetime.now(tz=timezone.utc).replace(tzinfo=None)], "cnt": [3]}
+            {"datetime": [datetime.now()], "cnt": [3]}  # 本地时间，模拟 CH 行为
         )
         assert helper.sync("1h", workers=3, what="funding_rate") is True
         assert mock_clickhouse.save_to_db.called
