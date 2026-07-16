@@ -21,7 +21,6 @@ from pond.clickhouse.kline import (
     FutureLongShortRatio,
     FutureLongShortPositionRatio,
 )
-from threading import Thread
 import threading
 import pandas as pd
 from loguru import logger
@@ -252,68 +251,45 @@ class FuturesHelper:
             return False
         task_counts = math.ceil(len(symbols) / workers)
         res_dict = {}
-        threads = []
+        sync_tasks = []
         for i in range(0, workers):
             worker_symbols = symbols[i * task_counts : (i + 1) * task_counts]
             if what == "kline":
-                worker = Thread(
-                    target=self.__sync_futures_kline,
-                    args=(
-                        signal,
-                        table,
-                        worker_symbols,
-                        interval,
-                        res_dict,
-                        slow_down_seconds,
-                    ),
+                sync_tasks.append(
+                    (self.__sync_futures_kline, (signal, table, worker_symbols, interval, res_dict, slow_down_seconds))
                 )
-                worker.start()
-                threads.append(worker)
             elif what == "info":
-                worker2 = Thread(
-                    target=self.__sync_futures_info,
-                    args=(signal, table, worker_symbols, res_dict),
+                sync_tasks.append(
+                    (self.__sync_futures_info, (signal, table, worker_symbols, res_dict))
                 )
-                worker2.start()
-                threads.append(worker2)
             elif what == "funding_rate":
-                worker3 = Thread(
-                    target=self.__sync_futures_funding_rate,
-                    args=(signal, table, worker_symbols, interval, res_dict),
+                sync_tasks.append(
+                    (self.__sync_futures_funding_rate, (signal, table, worker_symbols, interval, res_dict))
                 )
-                worker3.start()
-                threads.append(worker3)
             elif what == "holders":
-                worker4 = Thread(
-                    target=self.__sync_futures_base_asset_holders,
-                    args=(table, worker_symbols, interval, res_dict),
+                sync_tasks.append(
+                    (self.__sync_futures_base_asset_holders, (table, worker_symbols, interval, res_dict))
                 )
-                worker4.start()
-                threads.append(worker4)
             else:
-                worker5 = Thread(
-                    target=self.__sync_futures_extra_info,
-                    args=(
-                        what,
-                        signal,
-                        worker_symbols,
-                        interval,
-                        allow_missing_count,
-                        res_dict,
-                    ),
+                sync_tasks.append(
+                    (self.__sync_futures_extra_info, (what, signal, worker_symbols, interval, allow_missing_count, res_dict))
                 )
-                worker5.start()
-                threads.append(worker5)
 
-        [t.join() for t in threads]
-        if len(res_dict) != len(threads):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(fn, *args) for fn, args in sync_tasks]
+            concurrent.futures.wait(futures)
+            for future in futures:
+                exc = future.exception()
+                if exc is not None:
+                    logger.error(f"sync worker failed with exception: {exc}")
+
+        if len(res_dict) != len(sync_tasks):
             logger.error(
-                "res dict length not equal to threads length, child thread may exited unexpectedly."
+                "res dict length not equal to tasks length, child thread may exited unexpectedly."
             )
             return False
         for tid in res_dict.keys():
             if not res_dict[tid]:
-                # return false if any thread failed.
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
