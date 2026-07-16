@@ -474,9 +474,9 @@ class FuturesHelper:
                 klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
         except Exception as e:
             status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
-            if status == 418:
+            if status in (418, 429):
                 logger.error(
-                    f"futures helper sync kline 418 banned for {code}: {e}"
+                    f"futures helper sync kline {status} rate limited for {code}: {e}"
                 )
                 if _banned is not None:
                     _banned.set()
@@ -797,9 +797,9 @@ class FuturesHelper:
                 return None
         except Exception as e:
             status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
-            if status == 418:
+            if status in (418, 429):
                 logger.error(
-                    f"futures helper sync funding rate 418 banned for {code}: {e}"
+                    f"futures helper sync funding rate {status} rate limited for {code}: {e}"
                 )
                 if _banned is not None:
                     _banned.set()
