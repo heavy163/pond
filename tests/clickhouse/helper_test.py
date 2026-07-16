@@ -130,7 +130,6 @@ def helper(mock_clickhouse, mock_crypto_db):
     with patch.multiple(
         "pond.clickhouse.helper",
         DirectDataProxy=MagicMock(),
-        AsyncDirectDataProxy=MagicMock(),
         CoinGeckoIDMapper=MagicMock(),
         BinanceContractTool=MagicMock(),
         ChainbaseClient=MagicMock(),
@@ -144,15 +143,8 @@ def helper(mock_clickhouse, mock_crypto_db):
         )
 
         h.data_proxy.um_future_exchange_info.return_value = MOCK_EXCHANGE_INFO
-
-        async def mock_klines(*a, **kw):
-            return [MOCK_KLINE_RAW]
-
-        async def mock_funding(*a, **kw):
-            return [MOCK_FUNDING_RATE_RAW]
-
-        h.async_data_proxy.um_future_klines = mock_klines
-        h.async_data_proxy.um_future_funding_rate = mock_funding
+        h.data_proxy.um_future_klines.return_value = [MOCK_KLINE_RAW]
+        h.data_proxy.um_future_funding_rate.return_value = [MOCK_FUNDING_RATE_RAW]
 
         # gecko_id_mapper and contact_tool are class-level attributes set
         # at import time, so patch.multiple cannot replace them.

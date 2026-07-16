@@ -4,12 +4,8 @@
 参考 pond/clickhouse/helper.py 的 __main__ 入口写法。
 
 注意事项:
-  - __sync_futures_kline / __sync_futures_funding_rate 内部使用 asyncio.run()
-    在工作线程创建新事件循环, 而 AsyncDirectDataProxy 的 aiohttp session
-    在主线程创建, 导致 "Future attached to a different loop" 错误。
-    这是代码现有问题, 跨线程 asyncio 不兼容。
-  - 因此 kline/funding_rate 的异步 worker 会失败, 但 funding_rate 仍可通过
-    数据写入 (save_to_db 在 res_dict[tid]=True 之前执行) 向 ClickHouse 写数据。
+  - kline / funding_rate 同步使用 ThreadPoolExecutor + 同步 HTTP 请求，
+    不再依赖 asyncio / aiohttp。
 """
 import os
 import sys
@@ -150,11 +146,6 @@ logger.info("Cleaning up test data...")
 manager.native_sql_read_table(
     f"TRUNCATE TABLE IF EXISTS {CLICKHOUSE_DB}.future_funding_rate"
 )
-try:
-    import asyncio
-    asyncio.run(helper.async_data_proxy.close())
-except Exception:
-    pass
 logger.success("Test data cleaned up")
 
 # ---------------------------------------------------------------------------
