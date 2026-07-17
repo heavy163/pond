@@ -239,7 +239,6 @@ class FuturesHelper:
         slow_down_seconds: int = 0,
     ) -> bool:
         table = self.get_futures_table(interval, what)
-        _end_time_is_set = end_time is not None
         if end_time is not None:
             signal = end_time
         else:
@@ -261,11 +260,17 @@ class FuturesHelper:
         elif what == "info":
             self.__sync_futures_info(signal, table, symbols, res_dict, workers)
         elif what == "funding_rate":
-            self.__sync_futures_funding_rate(signal, table, symbols, interval, res_dict, slow_down_seconds, workers)
+            self.__sync_futures_funding_rate(
+                signal, table, symbols, interval, res_dict, slow_down_seconds, workers
+            )
         elif what == "holders":
-            self.__sync_futures_base_asset_holders(table, symbols, interval, res_dict, workers)
+            self.__sync_futures_base_asset_holders(
+                table, symbols, interval, res_dict, workers
+            )
         else:
-            self.__sync_futures_extra_info(what, signal, symbols, interval, allow_missing_count, res_dict, workers)
+            self.__sync_futures_extra_info(
+                what, signal, symbols, interval, allow_missing_count, res_dict, workers
+            )
         for tid in res_dict.keys():
             if not res_dict[tid]:
                 logger.warning(f"sync {what} failed: worker {tid} reported False")
@@ -288,20 +293,12 @@ class FuturesHelper:
                 return False
             lastest_count = count_df.iloc[0]["cnt"]
             lastest_time = count_df.iloc[0]["datetime"]
-            # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval
-            # lastest_time 来自 CH，存储/返回都是 UTC（naive）
-            if _end_time_is_set:
-                # signal 是调用方传入的本地时间，转 UTC 后再比较
-                _signal_utc = signal + dtm.timedelta(seconds=time.timezone)
-            else:
-                # signal 已是 UTC，无需转换
-                _signal_utc = signal
-            time_gap = abs((_signal_utc - lastest_time).total_seconds())
+            time_gap = abs((signal - lastest_time).total_seconds())
             max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(
-                f"{what} latest time {lastest_time} too far from signal {signal}, "
-                f"gap={time_gap:.0f}s > {max_allowed_gap}s"
+                    f"{what} latest time {lastest_time} too far from signal {signal}, "
+                    f"gap={time_gap:.0f}s > {max_allowed_gap}s"
                 )
                 return False
             # 校验 2: 数据量足够
@@ -425,7 +422,7 @@ class FuturesHelper:
             if not klines_list:
                 klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
         except Exception as e:
-            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            status = getattr(e, "status_code", None) or getattr(e, "status", None)
             if status in (418, 429):
                 logger.error(
                     f"futures helper sync kline {status} rate limited for {code}: {e}"
@@ -433,9 +430,7 @@ class FuturesHelper:
                 if _banned is not None:
                     _banned.set()
             else:
-                logger.error(
-                    f"futures helper sync kline failed for {code}: {e}"
-                )
+                logger.error(f"futures helper sync kline failed for {code}: {e}")
             return None
         finally:
             if slow_down_seconds > 0:
@@ -496,9 +491,16 @@ class FuturesHelper:
                 code = s["pair"]
                 future = executor.submit(
                     self.__fetch_single_kline,
-                    code, s["onboardDate"], latest_records_map,
-                    table, interval, interval_seconds, limit_seconds,
-                    signal, slow_down_seconds, _banned,
+                    code,
+                    s["onboardDate"],
+                    latest_records_map,
+                    table,
+                    interval,
+                    interval_seconds,
+                    limit_seconds,
+                    signal,
+                    slow_down_seconds,
+                    _banned,
                 )
                 future_map[future] = code
 
@@ -691,7 +693,9 @@ class FuturesHelper:
             }
         )
 
-    def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict, workers: int = 1):
+    def __sync_futures_info(
+        self, signal, table: FutureInfo, symbols, res_dict: dict, workers: int = 1
+    ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
         if signal is None:
@@ -742,8 +746,7 @@ class FuturesHelper:
             merged_df = pd.concat(info_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
         logger.info(
-            f"info sync done: {count}/{len(symbols)} symbols "
-            f"processed, saved to DB"
+            f"info sync done: {count}/{len(symbols)} symbols " f"processed, saved to DB"
         )
         res_dict[tid] = count == len(symbols)
 
@@ -783,7 +786,7 @@ class FuturesHelper:
             if not funding_list or len(funding_list) == 0:
                 return None
         except Exception as e:
-            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            status = getattr(e, "status_code", None) or getattr(e, "status", None)
             if status in (418, 429):
                 logger.error(
                     f"futures helper sync funding rate {status} rate limited for {code}: {e}"
@@ -791,9 +794,7 @@ class FuturesHelper:
                 if _banned is not None:
                     _banned.set()
             else:
-                logger.error(
-                    f"futures helper sync funding rate failed for {code}: {e}"
-                )
+                logger.error(f"futures helper sync funding rate failed for {code}: {e}")
             return None
         finally:
             if slow_down_seconds > 0:
@@ -814,8 +815,14 @@ class FuturesHelper:
         return funding_rate_df
 
     def __sync_futures_funding_rate(
-        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict,
-        slow_down_seconds: int = 0, workers: int = 1,
+        self,
+        signal,
+        table: FutureFundingRate,
+        symbols,
+        interval,
+        res_dict: dict,
+        slow_down_seconds: int = 0,
+        workers: int = 1,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -846,9 +853,15 @@ class FuturesHelper:
                 code = s["pair"]
                 future = executor.submit(
                     self.__fetch_single_funding_rate,
-                    code, s["onboardDate"], table, interval,
-                    interval_seconds, signal, latest_records_map,
-                    slow_down_seconds, _banned,
+                    code,
+                    s["onboardDate"],
+                    table,
+                    interval,
+                    interval_seconds,
+                    signal,
+                    latest_records_map,
+                    slow_down_seconds,
+                    _banned,
                 )
                 future_map[future] = code
 
@@ -911,7 +924,13 @@ class FuturesHelper:
         return "error", None
 
     def __sync_futures_extra_info(
-        self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict,
+        self,
+        data_name,
+        signal,
+        symbols,
+        interval,
+        allow_missing_count,
+        res_dict: dict,
         workers: int = 1,
     ):
         tid = threading.current_thread().ident
