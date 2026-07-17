@@ -886,7 +886,7 @@ class FuturesHelper:
         data_duration_seconds = (signal - lastest_record).total_seconds()
         if data_duration_seconds < interval_seconds:
             logger.debug(f"{code}: {data_name} up-to-date, skip")
-            return None
+            return "skip", None
         if lastest_record != self.clickhouse.data_start:
             lastest_record += timedelta(seconds=1)
         if data_name == "long_short_ratio":
@@ -903,7 +903,8 @@ class FuturesHelper:
             )
         if df is not None and len(df) > 0:
             logger.debug(f"{code}: fetched {data_name} ({len(df)} rows)")
-        return df
+            return "ok", df
+        return "error", None
 
     def __sync_futures_extra_info(
         self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict,
@@ -956,13 +957,14 @@ class FuturesHelper:
             for future in concurrent.futures.as_completed(future_map):
                 code = future_map[future]
                 try:
-                    result = future.result()
-                    if result is None:
+                    status, df = future.result()
+                    if status == "skip":
+                        continue
+                    if status == "error":
                         failure_count += 1
                         continue
-                    if len(result) == 0:
-                        continue
-                    extra_dfs.append(result)
+                    if status == "ok" and df is not None and len(df) > 0:
+                        extra_dfs.append(df)
                 except Exception as e:
                     logger.error(
                         f"futures helper sync {data_name} inner task failed for {code}: {e}"
