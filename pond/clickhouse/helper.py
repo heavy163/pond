@@ -249,6 +249,10 @@ class FuturesHelper:
         symbols = self.get_perpetual_symbols(signal)
         if symbols is None:
             return False
+        logger.info(
+            f"sync {what} start: {len(symbols)} symbols, workers={workers}, "
+            f"interval={interval}, signal={signal}"
+        )
         res_dict = {}
         if what == "kline":
             self.__sync_futures_kline(
@@ -264,6 +268,7 @@ class FuturesHelper:
             self.__sync_futures_extra_info(what, signal, symbols, interval, allow_missing_count, res_dict, workers)
         for tid in res_dict.keys():
             if not res_dict[tid]:
+                logger.warning(f"sync {what} failed: worker {tid} reported False")
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
@@ -310,6 +315,7 @@ class FuturesHelper:
                 f"{what} verified OK: datetime={lastest_time}, "
                 f"count={lastest_count}/{request_count}"
             )
+        logger.info(f"sync {what} completed successfully")
         return True
 
     def save_klines_from_ws(self, interval):
@@ -403,6 +409,7 @@ class FuturesHelper:
             data_duration_seconds = (signal - lastest_record).total_seconds()
 
         if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: kline up-to-date, skip")
             return None
 
         startTime = datetime2utctimestamp_milli(lastest_record)
@@ -445,6 +452,10 @@ class FuturesHelper:
             klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
         ]
         klines_df = klines_df.drop_duplicates(subset=["close_time"])
+        logger.debug(
+            f"{code}: fetched {len(klines_df)} klines "
+            f"({klines_df['open_time'].min()} ~ {klines_df['close_time'].max()})"
+        )
         return klines_df
 
     def __sync_futures_kline(
@@ -512,6 +523,10 @@ class FuturesHelper:
         if klines_dfs:
             merged_df = pd.concat(klines_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"kline sync done: {len(klines_dfs)}/{len(symbols)} symbols "
+            f"have data, saved to DB"
+        )
         res_dict[tid] = True
 
     def __fetch_single_holders(
@@ -529,17 +544,20 @@ class FuturesHelper:
                 lastest_record, datetime.fromtimestamp(onboard_date / 1000)
             )
             if lastest_record + timedelta(seconds=interval_seconds) > signal:
+                logger.debug(f"{code}: holders up-to-date, skip")
                 return "skip", None
         try:
             cg_id = self.gecko_id_mapper.get_coingecko_id(base_asset, exact_match=True)
             if cg_id is None:
                 return "error", None
             if cg_id == "":
+                logger.debug(f"{code}: holders noop (no coingecko id)")
                 return "noop", None
             chain_info = self.contact_tool.get_token_chain_info(cg_id)
             if chain_info is None:
                 return "error", None
             if len(chain_info) == 0:
+                logger.debug(f"{code}: holders noop (no chain info)")
                 return "noop", None
             holders_dfs = []
             for chain, address in chain_info.items():
@@ -560,6 +578,7 @@ class FuturesHelper:
         except Exception as e:
             logger.error(f"futures helper sync holders for {code} failed {e}")
             return "error", None
+        logger.debug(f"{code}: fetched holders data for {len(chain_info)} chains")
         return "ok", holders_dfs if holders_dfs else None
 
     def __sync_futures_base_asset_holders(
@@ -620,6 +639,10 @@ class FuturesHelper:
         if all_holders_dfs:
             merged_df = pd.concat(all_holders_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None, drop_duplicates=False)
+        logger.info(
+            f"holders sync done: {synced_count}/{len(symbols)} symbols "
+            f"processed, saved to DB"
+        )
         res_dict[tid] = synced_count == len(symbols)
 
     def __fetch_single_info(
@@ -634,12 +657,14 @@ class FuturesHelper:
             lastest_record, datetime.fromtimestamp(onboard_date / 1000)
         )
         if signal - lastest_record < timedelta(days=1):
+            logger.debug(f"{code}: info up-to-date, skip")
             return "skip", None
         query = code[:-4]
         cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
         if cg_id is None:
             return "error", None
         if cg_id == "":
+            logger.debug(f"{code}: fetched info (no coingecko id)")
             return "ok", pd.DataFrame(
                 {
                     "datetime": [signal],
@@ -653,6 +678,10 @@ class FuturesHelper:
             return "error", None
         total_supply = data.get("total_supply", None)
         market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
+        logger.debug(
+            f"{code}: fetched info "
+            f"(total_supply={total_supply}, mcap_fdv_ratio={market_cap_fdv_ratio})"
+        )
         return "ok", pd.DataFrame(
             {
                 "datetime": [signal],
@@ -712,6 +741,10 @@ class FuturesHelper:
         if info_dfs:
             merged_df = pd.concat(info_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"info sync done: {count}/{len(symbols)} symbols "
+            f"processed, saved to DB"
+        )
         res_dict[tid] = count == len(symbols)
 
     def __fetch_single_funding_rate(
@@ -735,6 +768,7 @@ class FuturesHelper:
         data_duration_seconds = (signal - lastest_record).total_seconds()
 
         if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: funding rate up-to-date, skip")
             return None
         startTime = datetime2utctimestamp_milli(lastest_record)
         _t0 = time.time()
@@ -776,6 +810,7 @@ class FuturesHelper:
             utcstamp_mill2datetime
         )
         funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
+        logger.debug(f"{code}: fetched {len(funding_rate_df)} funding rate records")
         return funding_rate_df
 
     def __sync_futures_funding_rate(
@@ -831,6 +866,10 @@ class FuturesHelper:
         if funding_dfs:
             merged_df = pd.concat(funding_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"funding_rate sync done: {len(funding_dfs)}/{len(symbols)} symbols "
+            f"have data, saved to DB"
+        )
         res_dict[tid] = True
 
     def __fetch_single_extra_info(
@@ -850,6 +889,7 @@ class FuturesHelper:
         )
         data_duration_seconds = (signal - lastest_record).total_seconds()
         if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: {data_name} up-to-date, skip")
             return None
         if lastest_record != self.clickhouse.data_start:
             lastest_record += timedelta(seconds=1)
@@ -865,6 +905,8 @@ class FuturesHelper:
             df = get_open_interest_history(
                 self.binance, code, interval, lastest_record, signal
             )
+        if df is not None and len(df) > 0:
+            logger.debug(f"{code}: fetched {data_name} ({len(df)} rows)")
         return df
 
     def __sync_futures_extra_info(
@@ -934,6 +976,11 @@ class FuturesHelper:
         if extra_dfs:
             merged_df = pd.concat(extra_dfs, ignore_index=True)
             self.clickhouse.save_to_db(table, merged_df, None)
+        succeeded = len(extra_dfs)
+        logger.info(
+            f"{data_name} sync done: {succeeded} succeeded, "
+            f"{failure_count} failed, saved to DB"
+        )
         res_dict[tid] = failure_count <= allow_missing_count
 
     def subscribe_futures(
