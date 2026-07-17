@@ -77,7 +77,10 @@ class DirectDataProxy(DataProxy):
         # 3. 筛选有对应现货的合约
         valid_futures = []
         for symbol in futures_info["symbols"]:
-            if symbol["status"] == "TRADING":
+            alread_onboard = datetime.now() - datetime.fromtimestamp(
+                symbol["onboardDate"] / 1000
+            ) > timedelta(days=1)
+            if alread_onboard and symbol["status"] == "TRADING":
                 # 处理合约符号（去除永续合约的"PERP"后缀）
                 symbol_clean = symbol["symbol"].replace("PERP", "")
                 base_asset = None

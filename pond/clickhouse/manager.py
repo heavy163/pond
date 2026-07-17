@@ -1,5 +1,6 @@
 import os
 import math
+import threading
 import datetime as dtm
 from typing import Any
 
@@ -51,9 +52,17 @@ class ClickHouseManager:
         metadata.create_all(self.engine)
         self.data_start = data_start
         self.native_uri = native_uri
+        self._thread_local = threading.local()
 
     def get_engine(self):
         return self.engine
+
+    def _get_native_client(self) -> Client:
+        client = getattr(self._thread_local, 'native_client', None)
+        if client is None:
+            client = Client.from_url(self.native_uri)
+            self._thread_local.native_client = client
+        return client
 
     def create_client(self, db_uri: str):
         parts = urlparse(db_uri)
@@ -137,24 +146,24 @@ class ClickHouseManager:
         if params is not None:
             query_params.update(params)
 
-        with Client.from_url(self.native_uri) as client:
-            df = client.query_dataframe(
-                query=sql, params=query_params, settings=dict(use_numpy=True)
-            )
-            if rename and not isinstance(table, str):
-                df = df.rename(mapper=table().get_colcom_names(), axis=1)
-            return df
+        client = self._get_native_client()
+        df = client.query_dataframe(
+            query=sql, params=query_params, settings=dict(use_numpy=True)
+        )
+        if rename and not isinstance(table, str):
+            df = df.rename(mapper=table().get_colcom_names(), axis=1)
+        return df
 
     def native_sql_read_table(
         self,
         sql: str,
         query_params: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
-        with Client.from_url(self.native_uri) as client:
-            df = client.query_dataframe(
-                query=sql, params=query_params, settings=dict(use_numpy=True)
-            )
-            return df
+        client = self._get_native_client()
+        df = client.query_dataframe(
+            query=sql, params=query_params, settings=dict(use_numpy=True)
+        )
+        return df
 
     def native_read_table(
         self,
@@ -247,10 +256,10 @@ class ClickHouseManager:
         for i in range(0, len(df), trunk_size):
             df_trunk = df[i : i + trunk_size]
             query = f"INSERT INTO {table_name} (*) VALUES"
-            with Client.from_url(self.native_uri) as client:
-                rows += client.insert_dataframe(
-                    query=query, dataframe=df_trunk, settings=dict(use_numpy=True)
-                )
+            client = self._get_native_client()
+            rows += client.insert_dataframe(
+                query=query, dataframe=df_trunk, settings=dict(use_numpy=True)
+            )
         logger.success(df[:1].to_dict())
         logger.success(f"total {len(df)} saved {rows} into table {table_name}")
         return rows
@@ -460,8 +469,8 @@ class ClickHouseManager:
         ORDER BY ({time_col}, {code_col})
         SETTINGS index_granularity = 8192;
         """
-        with Client.from_url(self.native_uri) as client:
-            client.execute(ddl)
+        client = self._get_native_client()
+        client.execute(ddl)
 
 
 if __name__ == "__main__":

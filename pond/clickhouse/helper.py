@@ -1,5 +1,5 @@
 import os
-import math
+import concurrent.futures
 from pond.clickhouse.manager import ClickHouseManager
 from typing import Optional
 import datetime as dtm
@@ -20,7 +20,6 @@ from pond.clickhouse.kline import (
     FutureLongShortRatio,
     FutureLongShortPositionRatio,
 )
-from threading import Thread
 import threading
 import pandas as pd
 from loguru import logger
@@ -245,93 +244,74 @@ class FuturesHelper:
         else:
             signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
         if workers is None:
-            workers = math.ceil(os.cpu_count() / 2)
+            workers = max(1, os.cpu_count() // 2)
         symbols = self.get_perpetual_symbols(signal)
         if symbols is None:
             return False
-        task_counts = math.ceil(len(symbols) / workers)
+        # 统一将 signal 转为 UTC（naive），后续所有 data_duration 比较都与 CH 的 UTC 时间对齐
+        if end_time is not None:
+            signal = signal + dtm.timedelta(seconds=time.timezone)
+        logger.info(
+            f"sync {what} start: {len(symbols)} symbols, workers={workers}, "
+            f"interval={interval}, signal={signal}"
+        )
         res_dict = {}
-        threads = []
-        for i in range(0, workers):
-            worker_symbols = symbols[i * task_counts : (i + 1) * task_counts]
-            if what == "kline":
-                worker = Thread(
-                    target=self.__sync_futures_kline,
-                    args=(
-                        signal,
-                        table,
-                        worker_symbols,
-                        interval,
-                        res_dict,
-                        slow_down_seconds,
-                    ),
-                )
-                worker.start()
-                threads.append(worker)
-            elif what == "info":
-                worker2 = Thread(
-                    target=self.__sync_futures_info,
-                    args=(signal, table, worker_symbols, res_dict),
-                )
-                worker2.start()
-                threads.append(worker2)
-            elif what == "funding_rate":
-                worker3 = Thread(
-                    target=self.__sync_futures_funding_rate,
-                    args=(signal, table, worker_symbols, interval, res_dict),
-                )
-                worker3.start()
-                threads.append(worker3)
-            elif what == "holders":
-                worker4 = Thread(
-                    target=self.__sync_futures_base_asset_holders,
-                    args=(table, worker_symbols, interval, res_dict),
-                )
-                worker4.start()
-                threads.append(worker4)
-            else:
-                worker5 = Thread(
-                    target=self.__sync_futures_extra_info,
-                    args=(
-                        what,
-                        signal,
-                        worker_symbols,
-                        interval,
-                        allow_missing_count,
-                        res_dict,
-                    ),
-                )
-                worker5.start()
-                threads.append(worker5)
-
-        [t.join() for t in threads]
-        if len(res_dict) != len(threads):
-            logger.error(
-                "res dict length not equal to threads length, child thread may exited unexpectedly."
+        if what == "kline":
+            self.__sync_futures_kline(
+                signal, table, symbols, interval, res_dict, slow_down_seconds, workers
             )
-            return False
+        elif what == "info":
+            self.__sync_futures_info(signal, table, symbols, res_dict, workers)
+        elif what == "funding_rate":
+            self.__sync_futures_funding_rate(signal, table, symbols, interval, res_dict, slow_down_seconds, workers)
+        elif what == "holders":
+            self.__sync_futures_base_asset_holders(table, symbols, interval, res_dict, workers)
+        else:
+            self.__sync_futures_extra_info(what, signal, symbols, interval, allow_missing_count, res_dict, workers)
         for tid in res_dict.keys():
             if not res_dict[tid]:
-                # return false if any thread failed.
+                logger.warning(f"sync {what} failed: worker {tid} reported False")
                 return False
         if what in ["kline", "funding_rate"]:
             request_count = len(symbols)
-            latest_kline_df = self.clickhouse.read_table(
-                table,
-                signal - timedelta(minutes=timeframe2minutes(interval) * 2),
-                signal,
-                filters=None,
-                rename=True,
+            start = signal - timedelta(days=1)
+            sql = f"""
+                SELECT datetime, count(*) AS cnt
+                FROM {table.__tablename__}
+                WHERE datetime >= %(start)s AND datetime <= %(end)s
+                GROUP BY datetime
+                ORDER BY datetime DESC
+                LIMIT 1
+            """
+            count_df = self.clickhouse.native_sql_read_table(
+                sql, {"start": start, "end": signal}
             )
-            if len(latest_kline_df) == 0:
+            if count_df is None or count_df.empty:
                 return False
-            time_col = "close_time" if what == "kline" else "fundingTime"
-            lastest_count = (
-                latest_kline_df.group_by(time_col).len().sort(time_col)[-1, "len"]
-            )
-            # allow 1 target data missing.
+            lastest_count = count_df.iloc[0]["cnt"]
+            lastest_time = count_df.iloc[0]["datetime"]
+            # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval
+            # signal 与 lastest_time 均为 UTC（naive），可直接比较
+            time_gap = abs((signal - lastest_time).total_seconds())
+            max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
+            if time_gap > max_allowed_gap:
+                logger.warning(
+                f"{what} latest time {lastest_time} too far from signal {signal}, "
+                f"gap={time_gap:.0f}s > {max_allowed_gap}s"
+                )
+                return False
+            # 校验 2: 数据量足够
             if lastest_count < request_count - allow_missing_count:
+                logger.warning(
+                    f"{what} count {lastest_count} < {request_count - allow_missing_count}, "
+                    f"missing={request_count - lastest_count}"
+                )
                 return False
+            logger.info(
+                f"{what} verified OK: datetime={lastest_time}, "
+                f"count={lastest_count}/{request_count}"
+            )
+        logger.info(f"sync {what} completed successfully")
         return True
 
     def save_klines_from_ws(self, interval):
@@ -387,6 +367,93 @@ class FuturesHelper:
         logger.debug(f"futures helper save_klines_from_ws data len {len(klines_df)}")
         self.clickhouse.save_dataframe(table.__tablename__, klines_df)
 
+    def __fetch_single_kline(
+        self,
+        code,
+        symbol_onboard_date,
+        latest_records_map,
+        table,
+        interval,
+        interval_seconds,
+        limit_seconds,
+        signal,
+        slow_down_seconds,
+        _banned: threading.Event = None,
+    ):
+        if _banned and _banned.is_set():
+            return None
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record,
+            datetime.fromtimestamp(symbol_onboard_date / 1000),
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+        if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
+            local_klines_df = self.crypto_db.load_history_data(
+                code,
+                lastest_record,
+                signal,
+                timeframe=interval,
+                httpx_proxies={"https": f"http://{self.proxy_host}:{self.proxy_port}"},
+            )
+            self.clickhouse.save_to_db(
+                table, local_klines_df.to_pandas(), table.code == code
+            )
+            lastest_record = self.clickhouse.get_latest_record_time(
+                table, table.code == code
+            )
+            data_duration_seconds = (signal - lastest_record).total_seconds()
+
+        if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: kline up-to-date, skip")
+            return None
+
+        startTime = datetime2utctimestamp_milli(lastest_record)
+        _t0 = time.time()
+        try:
+            klines_list = self.data_proxy.um_future_klines(
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
+            )
+            if not klines_list:
+                klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
+        except Exception as e:
+            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            if status in (418, 429):
+                logger.error(
+                    f"futures helper sync kline {status} rate limited for {code}: {e}"
+                )
+                if _banned is not None:
+                    _banned.set()
+            else:
+                logger.error(
+                    f"futures helper sync kline failed for {code}: {e}"
+                )
+            return None
+        finally:
+            if slow_down_seconds > 0:
+                _elapsed = time.time() - _t0
+                if _elapsed < slow_down_seconds:
+                    time.sleep(slow_down_seconds - _elapsed)
+
+        cols = list(table().get_colcom_names().values())[1:] + ["stub"]
+        klines_df = pd.DataFrame(klines_list, columns=cols)
+        klines_df["code"] = code
+        klines_df["open_time"] = klines_df["open_time"].apply(utcstamp_mill2datetime)
+        klines_df["close_time"] = klines_df["close_time"].apply(utcstamp_mill2datetime)
+        klines_df = klines_df[
+            klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
+        ]
+        klines_df = klines_df.drop_duplicates(subset=["close_time"])
+        logger.debug(
+            f"{code}: fetched {len(klines_df)} klines "
+            f"({klines_df['open_time'].min()} ~ {klines_df['close_time'].max()})"
+        )
+        return klines_df
+
     def __sync_futures_kline(
         self,
         signal,
@@ -395,6 +462,7 @@ class FuturesHelper:
         interval,
         res_dict: dict,
         slow_down_seconds: int = 0,
+        workers: int = 1,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -406,135 +474,111 @@ class FuturesHelper:
         latest_klines_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        latest_klines_df = pl.from_pandas(latest_klines_df)
-        for symbol in symbols:
-            code = symbol["pair"]
-            latest_record = latest_klines_df.filter(pl.col("code") == code)
-            lastest_record = (
-                latest_record[0, "datetime"]
-                if len(latest_record) > 0
-                else self.clickhouse.data_start
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-            # load history data and save into db
-            if data_duration_seconds > limit_seconds and self.fix_kline_with_cryptodb:
-                local_klines_df = self.crypto_db.load_history_data(
-                    code,
-                    lastest_record,
-                    signal,
-                    timeframe=interval,
-                    httpx_proxies={
-                        "https": f"http://{self.proxy_host}:{self.proxy_port}"
-                    },
-                )
-                self.clickhouse.save_to_db(
-                    table, local_klines_df.to_pandas(), table.code == code
-                )
-                # refresh data duration
-                lastest_record = self.clickhouse.get_latest_record_time(
-                    table, table.code == code
-                )
-                data_duration_seconds = (signal - lastest_record).total_seconds()
+        latest_records_map = {}
+        if latest_klines_df is not None and not latest_klines_df.empty:
+            for _, row in latest_klines_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
 
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync kline ignore too short duration {lastest_record}-{signal}"
+        klines_dfs = []
+        _banned = threading.Event()
+        inner_workers = min(len(symbols), workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for s in symbols:
+                if _banned.is_set():
+                    break
+                code = s["pair"]
+                future = executor.submit(
+                    self.__fetch_single_kline,
+                    code, s["onboardDate"], latest_records_map,
+                    table, interval, interval_seconds, limit_seconds,
+                    signal, slow_down_seconds, _banned,
+                )
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                if _banned.is_set():
+                    # 已触发限流，取消剩余任务
+                    for f in future_map:
+                        f.cancel()
+                    break
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        klines_dfs.append(result)
+                except concurrent.futures.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync kline task failed for {code}: {e}"
                     )
-                continue
 
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                klines_list = self.data_proxy.um_future_klines(
-                    code,
-                    "PERPETUAL",
-                    interval,
-                    startTime=startTime,
-                    limit=1000,
-                )
-                if not klines_list:
-                    # generate stub kline to mark latest sync time.
-                    klines_list = [self.gen_stub_kline_as_list(lastest_record, signal)]
-            except Exception as e:
-                logger.error(f"futures helper sync kline failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())[1:] + ["stub"]
-            klines_df = pd.DataFrame(klines_list, columns=cols)
-            klines_df["code"] = code
-            klines_df["open_time"] = klines_df["open_time"].apply(
-                utcstamp_mill2datetime
-            )
-            klines_df["close_time"] = klines_df["close_time"].apply(
-                utcstamp_mill2datetime
-            )
-            klines_df = klines_df[
-                klines_df["close_time"] <= datetime.now(tz=dtm.timezone.utc)
-            ]
-            klines_df = klines_df.drop_duplicates(subset=["close_time"])
-            self.clickhouse.save_to_db(table, klines_df, table.code == code)
-            if slow_down_seconds > 0:
-                time.sleep(slow_down_seconds)
+        if klines_dfs:
+            merged_df = pd.concat(klines_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"kline sync done: {len(klines_dfs)}/{len(symbols)} symbols "
+            f"have data, saved to DB"
+        )
         res_dict[tid] = True
 
-    def __sync_futures_funding_rate(
-        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict
+    def __fetch_single_holders(
+        self,
+        signal,
+        code,
+        base_asset,
+        onboard_date,
+        interval_seconds,
+        latest_records_map,
     ):
-        tid = threading.current_thread().ident
-        res_dict[tid] = False
-        interval_seconds = timeframe2minutes(interval) * 60
-        if signal is None:
-            signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
-            )
+        lastest_record = latest_records_map.get(code)
+        if lastest_record is not None:
             lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+                lastest_record, datetime.fromtimestamp(onboard_date / 1000)
             )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                continue
-            logger.info(
-                f"futures helper sync funding rate for {code}, lastest record is {lastest_record}, signal {signal}"
-            )
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                funding_list = self.data_proxy.um_future_funding_rate(
-                    code,
-                    "PERPETUAL",
-                    interval,
-                    startTime=startTime,
-                    limit=1000,
-                )
-                if not funding_list or len(funding_list) == 0:
+            if lastest_record + timedelta(seconds=interval_seconds) > signal:
+                logger.debug(f"{code}: holders up-to-date, skip")
+                return "skip", None
+        try:
+            cg_id = self.gecko_id_mapper.get_coingecko_id(base_asset, exact_match=True)
+            if cg_id is None:
+                return "error", None
+            if cg_id == "":
+                logger.debug(f"{code}: holders noop (no coingecko id)")
+                return "noop", None
+            chain_info = self.contact_tool.get_token_chain_info(cg_id)
+            if chain_info is None:
+                return "error", None
+            if len(chain_info) == 0:
+                logger.debug(f"{code}: holders noop (no chain info)")
+                return "noop", None
+            holders_dfs = []
+            for chain, address in chain_info.items():
+                if address is None or len(address.strip()) == 0:
                     continue
-            except Exception as e:
-                logger.error(f"futures helper sync funding rate for {code} failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())
-            funding_rate_df = pd.DataFrame(funding_list, columns=cols)
-            funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
-                "Float64"
-            )
-            funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
-            funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
-                utcstamp_mill2datetime
-            )
-            funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
-            self.clickhouse.save_to_db(table, funding_rate_df, table.code == code)
-        res_dict[tid] = True
+                chain_id = ChainId.get_chain_id(chain)
+                if chain_id is None:
+                    continue
+                holders = self.chainbase_client.get_topn_holders(
+                    chain_id, address, page=1, limit=20
+                )
+                time.sleep(1)
+                df = pd.DataFrame(data=holders)
+                df["chain"] = chain
+                df["code"] = code
+                df["datetime"] = signal
+                holders_dfs.append(df)
+        except Exception as e:
+            logger.error(f"futures helper sync holders for {code} failed {e}")
+            return "error", None
+        logger.debug(f"{code}: fetched holders data for {len(chain_info)} chains")
+        return "ok", holders_dfs if holders_dfs else None
 
     def __sync_futures_base_asset_holders(
-        self, table: TokenHolders, symbols, interval, res_dict: dict
+        self, table: TokenHolders, symbols, interval, res_dict: dict, workers: int = 1
     ):
         table = TokenHolders
         tid = threading.current_thread().ident
@@ -544,78 +588,106 @@ class FuturesHelper:
         holders_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        holders_df = pl.from_pandas(holders_df)
+        latest_records_map = {}
+        if holders_df is not None and not holders_df.empty:
+            for _, row in holders_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
+
+        all_holders_dfs = []
         synced_count = 0
-        for symbol in symbols:
-            code = symbol["pair"]
-            base_asset = symbol["baseAsset"]
-            holder_info = holders_df.filter(pl.col("code") == code)
-            lastest_record = (
-                holder_info[0, "datetime"] if len(holder_info) > 0 else None
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            if (
-                lastest_record is not None
-                and lastest_record + timedelta(seconds=interval_seconds) > signal
-            ):
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper token holders ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                synced_count += 1
-                continue
-            try:
-                cg_id = self.gecko_id_mapper.get_coingecko_id(
-                    base_asset, exact_match=True
+        inner_workers = min(len(symbols), workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_holders,
+                    signal,
+                    code,
+                    symbol["baseAsset"],
+                    symbol["onboardDate"],
+                    interval_seconds,
+                    latest_records_map,
                 )
-                if cg_id is None:
-                    logger.warning(
-                        f"futures helper sync holders query coin gecko id for {code} failed"
-                    )
-                    continue
-                if cg_id == "":
-                    if self.verbose_log:
-                        logger.info(
-                            f"futures helper sync holders can not find coin gecko id for {code}"
-                        )
-                    synced_count += 1
-                    continue
-                chain_info = self.contact_tool.get_token_chain_info(cg_id)
-                holders_dfs = []
-                if chain_info is None:
-                    continue
-                if len(chain_info) == 0:
-                    synced_count += 1
-                    continue
-                for chain, address in chain_info.items():
-                    if address is None or len(address.strip()) == 0:
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    status, dfs = future.result()
+                    if status == "skip":
+                        synced_count += 1
                         continue
-                    chain_id = ChainId.get_chain_id(chain)
-                    if chain_id is None:
+                    if status == "noop":
+                        synced_count += 1
                         continue
-                    holders = self.chainbase_client.get_topn_holders(
-                        chain_id, address, page=1, limit=20
+                    if status == "ok" and dfs:
+                        all_holders_dfs.extend(dfs)
+                        synced_count += 1
+                    # "error" → don't count
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync holders inner task failed for {code}: {e}"
                     )
-                    time.sleep(1)
-                    df = pd.DataFrame(data=holders)
-                    df["chain"] = chain
-                    df["code"] = code
-                    df["datetime"] = signal
-                    holders_dfs.append(df)
-            except Exception as e:
-                logger.error(f"futures helper sync holders for {code} failed {e}")
-                continue
-            if len(holders_dfs) > 0:
-                result_df = pd.concat(holders_dfs)
-                self.clickhouse.save_to_db(
-                    table, result_df, table.code == code, drop_duplicates=False
-                )
-            synced_count += 1
+
+        if all_holders_dfs:
+            merged_df = pd.concat(all_holders_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None, drop_duplicates=False)
+        logger.info(
+            f"holders sync done: {synced_count}/{len(symbols)} symbols "
+            f"processed, saved to DB"
+        )
         res_dict[tid] = synced_count == len(symbols)
 
-    def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict):
+    def __fetch_single_info(
+        self,
+        signal,
+        code,
+        onboard_date,
+        latest_records_map,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(onboard_date / 1000)
+        )
+        if signal - lastest_record < timedelta(days=1):
+            logger.debug(f"{code}: info up-to-date, skip")
+            return "skip", None
+        query = code[:-4]
+        cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
+        if cg_id is None:
+            return "error", None
+        if cg_id == "":
+            logger.debug(f"{code}: fetched info (no coingecko id)")
+            return "ok", pd.DataFrame(
+                {
+                    "datetime": [signal],
+                    "code": [code],
+                    "total_supply": None,
+                    "market_cap_fdv_ratio": None,
+                }
+            )
+        data = get_coin_market_data(cg_id)
+        if data is None:
+            return "error", None
+        total_supply = data.get("total_supply", None)
+        market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
+        logger.debug(
+            f"{code}: fetched info "
+            f"(total_supply={total_supply}, mcap_fdv_ratio={market_cap_fdv_ratio})"
+        )
+        return "ok", pd.DataFrame(
+            {
+                "datetime": [signal],
+                "code": [code],
+                "total_supply": [total_supply],
+                "market_cap_fdv_ratio": [market_cap_fdv_ratio],
+            }
+        )
+
+    def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict, workers: int = 1):
         tid = threading.current_thread().ident
         res_dict[tid] = False
         if signal is None:
@@ -623,125 +695,219 @@ class FuturesHelper:
         info_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
-        info_df = pl.from_pandas(info_df)
-        count = 0
-        for symbol in symbols:
-            code = symbol["pair"]
-            latest_record = info_df.filter(pl.col("code") == code)
-            lastest_record = (
-                latest_record[0, "datetime"]
-                if len(latest_record) > 0
-                else self.clickhouse.data_start
-            )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            if signal - lastest_record < timedelta(days=1):
-                count += 1
-                if self.verbose_log:
-                    logger.info(
-                        f"futures helper sync info ignore too short duration for {code}"
+        latest_records_map = {}
+        if info_df is not None and not info_df.empty:
+            for _, row in info_df.iterrows():
+                latest_records_map[row["code"]] = row["datetime"]
+
+        info_dfs = []
+        inner_workers = min(len(symbols), workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_info,
+                    signal,
+                    code,
+                    symbol["onboardDate"],
+                    latest_records_map,
+                )
+                future_map[future] = code
+
+            count = 0
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    status, df = future.result()
+                    if status == "skip":
+                        count += 1
+                        continue
+                    if status == "ok":
+                        info_dfs.append(df)
+                        count += 1
+                    # "error" → don't count
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync info inner task failed for {code}: {e}"
                     )
-                continue
-            query = code[:-4]
-            cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
-            if cg_id is None:
-                logger.warning(
-                    f"futures helper sync info query coin gecko id for {code} failed"
-                )
-                continue
-            if cg_id == "":
-                logger.warning(
-                    f"futures helper sync info can not find coin gecko id for {code}"
-                )
-                self.clickhouse.save_to_db(
-                    table,
-                    pd.DataFrame(
-                        {
-                            "datetime": [signal],
-                            "code": [code],
-                            "total_supply": None,
-                            "market_cap_fdv_ratio": None,
-                        }
-                    ),
-                    table.code == code,
-                )
-                count += 1
-                continue
-            data = get_coin_market_data(cg_id)
-            if data is None:
-                continue
-            total_supply = data.get("total_supply", None)
-            market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
-            self.clickhouse.save_to_db(
-                table,
-                pd.DataFrame(
-                    {
-                        "datetime": [signal],
-                        "code": [code],
-                        "total_supply": [total_supply],
-                        "market_cap_fdv_ratio": [market_cap_fdv_ratio],
-                    }
-                ),
-                table.code == code,
-            )
-            count += 1
+
+        if info_dfs:
+            merged_df = pd.concat(info_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"info sync done: {count}/{len(symbols)} symbols "
+            f"processed, saved to DB"
+        )
         res_dict[tid] = count == len(symbols)
 
+    def __fetch_single_funding_rate(
+        self,
+        code,
+        symbol_onboard_date,
+        table,
+        interval,
+        interval_seconds,
+        signal,
+        latest_records_map,
+        slow_down_seconds=0,
+        _banned: threading.Event = None,
+    ):
+        if _banned and _banned.is_set():
+            return None
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(symbol_onboard_date / 1000)
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+
+        if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: funding rate up-to-date, skip")
+            return None
+        startTime = datetime2utctimestamp_milli(lastest_record)
+        _t0 = time.time()
+        try:
+            funding_list = self.data_proxy.um_future_funding_rate(
+                code,
+                "PERPETUAL",
+                interval,
+                startTime=startTime,
+                limit=1000,
+            )
+            if not funding_list or len(funding_list) == 0:
+                return None
+        except Exception as e:
+            status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+            if status in (418, 429):
+                logger.error(
+                    f"futures helper sync funding rate {status} rate limited for {code}: {e}"
+                )
+                if _banned is not None:
+                    _banned.set()
+            else:
+                logger.error(
+                    f"futures helper sync funding rate failed for {code}: {e}"
+                )
+            return None
+        finally:
+            if slow_down_seconds > 0:
+                _elapsed = time.time() - _t0
+                if _elapsed < slow_down_seconds:
+                    time.sleep(slow_down_seconds - _elapsed)
+        cols = list(table().get_colcom_names().values())
+        funding_rate_df = pd.DataFrame(funding_list, columns=cols)
+        funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
+            "Float64"
+        )
+        funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
+        funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
+            utcstamp_mill2datetime
+        )
+        funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
+        logger.debug(f"{code}: fetched {len(funding_rate_df)} funding rate records")
+        return funding_rate_df
+
     def __sync_futures_funding_rate(
-        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict
+        self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict,
+        slow_down_seconds: int = 0, workers: int = 1,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
         interval_seconds = timeframe2minutes(interval) * 60
         if signal is None:
             signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
+        latest_records_map = {}
+        try:
+            latest_records_df = self.clickhouse.read_latest_n_record(
+                table.__tablename__, signal - timedelta(days=30), signal, n=1
             )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
+            if latest_records_df is not None and not latest_records_df.empty:
+                for _, row in latest_records_df.iterrows():
+                    latest_records_map[row["code"]] = row["datetime"]
+        except Exception as e:
+            logger.error(f"futures helper sync funding_rate batch query failed {e}")
 
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
-                    )
-                continue
-            startTime = datetime2utctimestamp_milli(lastest_record)
-            try:
-                funding_list = self.data_proxy.um_future_funding_rate(
-                    code,
-                    "PERPETUAL",
-                    interval,
-                    startTime=startTime,
-                    limit=1000,
+        funding_dfs = []
+        _banned = threading.Event()
+        inner_workers = min(len(symbols), workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for s in symbols:
+                if _banned.is_set():
+                    break
+                code = s["pair"]
+                future = executor.submit(
+                    self.__fetch_single_funding_rate,
+                    code, s["onboardDate"], table, interval,
+                    interval_seconds, signal, latest_records_map,
+                    slow_down_seconds, _banned,
                 )
-                if not funding_list or len(funding_list) == 0:
-                    continue
-            except Exception as e:
-                logger.error(f"futures helper sync funding rate for {code} failed {e}")
-                continue
-            cols = list(table().get_colcom_names().values())
-            funding_rate_df = pd.DataFrame(funding_list, columns=cols)
-            funding_rate_df["fundingRate"] = funding_rate_df["fundingRate"].astype(
-                "Float64"
-            )
-            funding_rate_df["markPrice"] = pd.to_numeric(funding_rate_df["markPrice"])
-            funding_rate_df["fundingTime"] = funding_rate_df["fundingTime"].apply(
-                utcstamp_mill2datetime
-            )
-            funding_rate_df = funding_rate_df.drop_duplicates(subset=["fundingTime"])
-            self.clickhouse.save_to_db(table, funding_rate_df, table.code == code)
-            time.sleep(0.01)
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is not None and len(result) > 0:
+                        funding_dfs.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync funding rate task failed for {code}: {e}"
+                    )
+
+        if funding_dfs:
+            merged_df = pd.concat(funding_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
+        logger.info(
+            f"funding_rate sync done: {len(funding_dfs)}/{len(symbols)} symbols "
+            f"have data, saved to DB"
+        )
         res_dict[tid] = True
 
+    def __fetch_single_extra_info(
+        self,
+        data_name,
+        code,
+        symbol_onboard_date,
+        table,
+        interval,
+        interval_seconds,
+        signal,
+        latest_records_map,
+    ):
+        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
+        lastest_record = max(
+            lastest_record, datetime.fromtimestamp(symbol_onboard_date / 1000)
+        )
+        data_duration_seconds = (signal - lastest_record).total_seconds()
+        if data_duration_seconds < interval_seconds:
+            logger.debug(f"{code}: {data_name} up-to-date, skip")
+            return None
+        if lastest_record != self.clickhouse.data_start:
+            lastest_record += timedelta(seconds=1)
+        if data_name == "long_short_ratio":
+            df = get_long_short_account_ratio_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        elif data_name == "long_short_position_ratio":
+            df = get_long_short_position_ratio_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        elif data_name == "open_interest":
+            df = get_open_interest_history(
+                self.binance, code, interval, lastest_record, signal
+            )
+        if df is not None and len(df) > 0:
+            logger.debug(f"{code}: fetched {data_name} ({len(df)} rows)")
+        return df
+
     def __sync_futures_extra_info(
-        self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict
+        self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict,
+        workers: int = 1,
     ):
         tid = threading.current_thread().ident
         failure_count = 0
@@ -755,46 +921,62 @@ class FuturesHelper:
         elif data_name == "long_short_position_ratio":
             table = FutureLongShortPositionRatio
 
-        for symbol in symbols:
-            code = symbol["pair"]
-            lastest_record = self.clickhouse.get_latest_record_time(
-                table, table.code == code
+        latest_records_map = {}
+        try:
+            latest_records_df = self.clickhouse.read_latest_n_record(
+                table.__tablename__, signal - timedelta(days=30), signal, n=1
             )
-            lastest_record = max(
-                lastest_record, datetime.fromtimestamp(symbol["onboardDate"] / 1000)
-            )
-            data_duration_seconds = (signal - lastest_record).total_seconds()
-            if data_duration_seconds < interval_seconds:
-                if self.verbose_log:
-                    logger.debug(
-                        f"futures helper sync funding rate ignore too short duration {lastest_record}-{signal} for {code}"
+            if latest_records_df is not None and not latest_records_df.empty:
+                for _, row in latest_records_df.iterrows():
+                    latest_records_map[row["code"]] = row["datetime"]
+        except Exception as e:
+            logger.error(f"futures helper sync {data_name} batch query failed {e}")
+
+        extra_dfs = []
+        inner_workers = min(len(symbols), workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for symbol in symbols:
+                code = symbol["pair"]
+                future = executor.submit(
+                    self.__fetch_single_extra_info,
+                    data_name,
+                    code,
+                    symbol["onboardDate"],
+                    table,
+                    interval,
+                    interval_seconds,
+                    signal,
+                    latest_records_map,
+                )
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    result = future.result()
+                    if result is None:
+                        failure_count += 1
+                        continue
+                    if len(result) == 0:
+                        continue
+                    extra_dfs.append(result)
+                except Exception as e:
+                    logger.error(
+                        f"futures helper sync {data_name} inner task failed for {code}: {e}"
                     )
-                continue
-            logger.info(
-                f"futures helper __sync_futures_extra_info {data_name} for {code}, lastest record is {lastest_record}, signal {signal}"
-            )
-            # avoid downloaded duplicated data
-            if lastest_record != self.clickhouse.data_start:
-                lastest_record += timedelta(seconds=1)
-            if data_name == "long_short_ratio":
-                df = get_long_short_account_ratio_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            elif data_name == "long_short_position_ratio":
-                df = get_long_short_position_ratio_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            elif data_name == "open_interest":
-                df = get_open_interest_history(
-                    self.binance, code, interval, lastest_record, signal
-                )
-            if df is None:
-                failure_count += 1
-                continue
-            if len(df) == 0:
-                continue
-            self.clickhouse.save_to_db(table, df, table.code == code)
-            time.sleep(0.01)
+                    failure_count += 1
+
+        if extra_dfs:
+            merged_df = pd.concat(extra_dfs, ignore_index=True)
+            self.clickhouse.save_to_db(table, merged_df, None)
+        succeeded = len(extra_dfs)
+        logger.info(
+            f"{data_name} sync done: {succeeded} succeeded, "
+            f"{failure_count} failed, saved to DB"
+        )
         res_dict[tid] = failure_count <= allow_missing_count
 
     def subscribe_futures(
@@ -1018,10 +1200,12 @@ if __name__ == "__main__":
     while not ret:
         ret = helper.sync(
             interval,
-            workers=5,
+            workers=1,
             end_time=end_time,
             what="kline",
+            slow_down_seconds=0.0,
         )
+        time.sleep(60)
         print(f"sync ret {ret}")
 
     # helper.subscribe_futures(interval)
