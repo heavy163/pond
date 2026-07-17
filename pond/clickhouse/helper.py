@@ -1,5 +1,4 @@
 import os
-import math
 import concurrent.futures
 from pond.clickhouse.manager import ClickHouseManager
 from typing import Optional
@@ -246,78 +245,23 @@ class FuturesHelper:
         else:
             signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
         if workers is None:
-            workers = math.ceil(os.cpu_count() / 2)
+            workers = max(1, os.cpu_count() // 2)
         symbols = self.get_perpetual_symbols(signal)
         if symbols is None:
             return False
-        task_counts = math.ceil(len(symbols) / workers)
         res_dict = {}
-        sync_tasks = []
-        for i in range(0, workers):
-            worker_symbols = symbols[i * task_counts : (i + 1) * task_counts]
-            if what == "kline":
-                sync_tasks.append(
-                    (
-                        self.__sync_futures_kline,
-                        (
-                            signal,
-                            table,
-                            worker_symbols,
-                            interval,
-                            res_dict,
-                            slow_down_seconds,
-                        ),
-                    )
-                )
-            elif what == "info":
-                sync_tasks.append(
-                    (
-                        self.__sync_futures_info,
-                        (signal, table, worker_symbols, res_dict),
-                    )
-                )
-            elif what == "funding_rate":
-                sync_tasks.append(
-                    (
-                        self.__sync_futures_funding_rate,
-                        (signal, table, worker_symbols, interval, res_dict, slow_down_seconds),
-                    )
-                )
-            elif what == "holders":
-                sync_tasks.append(
-                    (
-                        self.__sync_futures_base_asset_holders,
-                        (table, worker_symbols, interval, res_dict),
-                    )
-                )
-            else:
-                sync_tasks.append(
-                    (
-                        self.__sync_futures_extra_info,
-                        (
-                            what,
-                            signal,
-                            worker_symbols,
-                            interval,
-                            allow_missing_count,
-                            res_dict,
-                        ),
-                    )
-                )
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(fn, *args) for fn, args in sync_tasks]
-            concurrent.futures.wait(futures)
-            for future in futures:
-                exc = future.exception()
-                if exc is not None:
-                    logger.error(f"sync worker failed with exception: {exc}")
-
-        if len(res_dict) != len(sync_tasks):
-            logger.error(
-                "res dict length not equal to tasks length, child thread may exited unexpectedly."
+        if what == "kline":
+            self.__sync_futures_kline(
+                signal, table, symbols, interval, res_dict, slow_down_seconds, workers
             )
-            return False
+        elif what == "info":
+            self.__sync_futures_info(signal, table, symbols, res_dict, workers)
+        elif what == "funding_rate":
+            self.__sync_futures_funding_rate(signal, table, symbols, interval, res_dict, slow_down_seconds, workers)
+        elif what == "holders":
+            self.__sync_futures_base_asset_holders(table, symbols, interval, res_dict, workers)
+        else:
+            self.__sync_futures_extra_info(what, signal, symbols, interval, allow_missing_count, res_dict, workers)
         for tid in res_dict.keys():
             if not res_dict[tid]:
                 return False
@@ -511,6 +455,7 @@ class FuturesHelper:
         interval,
         res_dict: dict,
         slow_down_seconds: int = 0,
+        workers: int = 1,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -529,7 +474,7 @@ class FuturesHelper:
 
         klines_dfs = []
         _banned = threading.Event()
-        inner_workers = min(len(symbols), 8)
+        inner_workers = min(len(symbols), workers)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
@@ -618,7 +563,7 @@ class FuturesHelper:
         return "ok", holders_dfs if holders_dfs else None
 
     def __sync_futures_base_asset_holders(
-        self, table: TokenHolders, symbols, interval, res_dict: dict
+        self, table: TokenHolders, symbols, interval, res_dict: dict, workers: int = 1
     ):
         table = TokenHolders
         tid = threading.current_thread().ident
@@ -635,7 +580,7 @@ class FuturesHelper:
 
         all_holders_dfs = []
         synced_count = 0
-        inner_workers = min(len(symbols), 10)
+        inner_workers = min(len(symbols), workers)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
@@ -717,7 +662,7 @@ class FuturesHelper:
             }
         )
 
-    def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict):
+    def __sync_futures_info(self, signal, table: FutureInfo, symbols, res_dict: dict, workers: int = 1):
         tid = threading.current_thread().ident
         res_dict[tid] = False
         if signal is None:
@@ -731,7 +676,7 @@ class FuturesHelper:
                 latest_records_map[row["code"]] = row["datetime"]
 
         info_dfs = []
-        inner_workers = min(len(symbols), 10)
+        inner_workers = min(len(symbols), workers)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
@@ -835,7 +780,7 @@ class FuturesHelper:
 
     def __sync_futures_funding_rate(
         self, signal, table: FutureFundingRate, symbols, interval, res_dict: dict,
-        slow_down_seconds: int = 0,
+        slow_down_seconds: int = 0, workers: int = 1,
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
@@ -855,7 +800,7 @@ class FuturesHelper:
 
         funding_dfs = []
         _banned = threading.Event()
-        inner_workers = min(len(symbols), 8)
+        inner_workers = min(len(symbols), workers)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
@@ -923,7 +868,8 @@ class FuturesHelper:
         return df
 
     def __sync_futures_extra_info(
-        self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict
+        self, data_name, signal, symbols, interval, allow_missing_count, res_dict: dict,
+        workers: int = 1,
     ):
         tid = threading.current_thread().ident
         failure_count = 0
@@ -949,7 +895,7 @@ class FuturesHelper:
             logger.error(f"futures helper sync {data_name} batch query failed {e}")
 
         extra_dfs = []
-        inner_workers = min(len(symbols), 10)
+        inner_workers = min(len(symbols), workers)
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=inner_workers
         ) as executor:
