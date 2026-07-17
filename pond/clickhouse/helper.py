@@ -239,6 +239,7 @@ class FuturesHelper:
         slow_down_seconds: int = 0,
     ) -> bool:
         table = self.get_futures_table(interval, what)
+        _end_time_is_set = end_time is not None
         if end_time is not None:
             signal = end_time
         else:
@@ -248,9 +249,6 @@ class FuturesHelper:
         symbols = self.get_perpetual_symbols(signal)
         if symbols is None:
             return False
-        # 统一将 signal 转为 UTC（naive），后续所有 data_duration 比较都与 CH 的 UTC 时间对齐
-        if end_time is not None:
-            signal = signal + dtm.timedelta(seconds=time.timezone)
         logger.info(
             f"sync {what} start: {len(symbols)} symbols, workers={workers}, "
             f"interval={interval}, signal={signal}"
@@ -291,8 +289,14 @@ class FuturesHelper:
             lastest_count = count_df.iloc[0]["cnt"]
             lastest_time = count_df.iloc[0]["datetime"]
             # 校验 1: 最新时间与 signal 相差不超过 0.5 个 interval
-            # signal 与 lastest_time 均为 UTC（naive），可直接比较
-            time_gap = abs((signal - lastest_time).total_seconds())
+            # lastest_time 来自 CH，存储/返回都是 UTC（naive）
+            if _end_time_is_set:
+                # signal 是调用方传入的本地时间，转 UTC 后再比较
+                _signal_utc = signal + dtm.timedelta(seconds=time.timezone)
+            else:
+                # signal 已是 UTC，无需转换
+                _signal_utc = signal
+            time_gap = abs((_signal_utc - lastest_time).total_seconds())
             max_allowed_gap = timeframe2minutes(interval) * 60 * 0.5
             if time_gap > max_allowed_gap:
                 logger.warning(
@@ -1205,7 +1209,7 @@ if __name__ == "__main__":
             workers=1,
             end_time=end_time,
             what="kline",
-            slow_down_seconds=0.0,
+            slow_down_seconds=0.01,
         )
         time.sleep(60)
         print(f"sync ret {ret}")
