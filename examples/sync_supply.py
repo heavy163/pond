@@ -31,6 +31,12 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+import pandas as pd
+from loguru import logger
+
+from pond.clickhouse.helper import FuturesHelper
+from pond.clickhouse.kline import FutureInfo
+from pond.duckdb.crypto import CryptoDB
 
 # 将项目根目录加入 sys.path，允许直接 python examples/sync_supply.py 运行
 _THIS_DIR = Path(__file__).resolve().parent
@@ -38,26 +44,17 @@ _PROJECT_ROOT = _THIS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import pandas as pd
-from loguru import logger
-
-from pond.cmc import CMCMarketDataClient
-from pond.clickhouse.helper import FuturesHelper
-from pond.clickhouse.kline import FutureInfo
-from pond.duckdb.crypto import CryptoDB
-
 
 def main():
     # ── 1. 初始化 ──
     db_path = Path(os.environ.get("DUCKDB_PATH", "/share/DuckDB"))
     crypto_db = CryptoDB(db_path)
 
-    clickhouse_pwd = os.environ.get("CLICKHOUSE_PWD")
-    if not clickhouse_pwd:
-        logger.warning("CLICKHOUSE_PWD 未设置，使用无密码连接")
-    conn_str = f"clickhouse://default:{clickhouse_pwd or ''}@localhost:8123/quant"
+    host = os.environ.get("CLICKHOUSE_HOST").strip()
+    password = os.environ.get("CLICKHOUSE_PWD").strip()
+    conn_str = f"clickhouse://default:{password}@{host}:8123/quant"
     native_conn_str = (
-        f"clickhouse+native://default:{clickhouse_pwd or ''}@localhost:9000/quant"
+        f"clickhouse+native://default:{password}@{host}:9000/quant?tcp_keepalive=true"
     )
 
     # 如果 clickhouse 不可用，这里会报错。实际使用时可改为 try/except
@@ -115,7 +112,7 @@ def main():
             10,
         )
         if latest is not None and not latest.empty:
-            logger.info(f"最近写入的供应量数据（前 5 条）:")
+            logger.info("最近写入的供应量数据（前 5 条）:")
             print(latest.head(5).to_string())
     except Exception as e:
         logger.warning(f"查询最新数据失败: {e}")
