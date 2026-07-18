@@ -31,7 +31,7 @@ from pond.utils.times import (
     utcstamp_mill2datetime,
     timeframe2minutes,
 )
-from pond.coin_gecko.coin_info import get_coin_market_data
+from pond.cmc import CMCMarketDataClient
 from pond.coin_gecko.id_mapper import CoinGeckoIDMapper
 from pond.coin_gecko.contract_info import BinanceContractTool
 from pond.chain_base.client import ChainbaseClient
@@ -43,6 +43,8 @@ from pond.binance_history.futures_api import (
 )
 from binance.client import Client
 from pond.binance_history.websocket_client import BinanceWSClientWrapper
+from loguru import logger
+from pathlib import Path
 
 
 class DataProxy:
@@ -113,6 +115,7 @@ class FuturesHelper:
     exchange: UMFutures = None
     data_proxy: DataProxy = None
     fix_kline_with_cryptodb: bool = None
+    cmc_client: CMCMarketDataClient = None
     gecko_id_mapper: CoinGeckoIDMapper = CoinGeckoIDMapper()
     contact_tool: BinanceContractTool = BinanceContractTool()
     binance: Client = None
@@ -146,6 +149,15 @@ class FuturesHelper:
         self.binance = Client(binance_api_key, binance_api_secret)
         self.proxy_host = kwargs.get("proxy_host", None)
         self.proxy_port = kwargs.get("proxy_port", None)
+
+        # CMC 客户端（用于替代 CoinGecko 查询代币供应量）
+        cmc_cache_path = kwargs.get(
+            "CMC_CACHE_PATH",
+            os.environ.get("CMC_CACHE_PATH", "cmc_mapping_cache.json"),
+        )
+        self.cmc_client = CMCMarketDataClient(
+            cache_path=cmc_cache_path,
+        )
 
     def set_data_prox(self, data_proxy: DataProxy):
         self.data_proxy = data_proxy
@@ -647,59 +659,38 @@ class FuturesHelper:
         )
         res_dict[tid] = synced_count == len(symbols)
 
-    def __fetch_single_info(
-        self,
-        signal,
-        code,
-        onboard_date,
-        latest_records_map,
-    ):
-        lastest_record = latest_records_map.get(code, self.clickhouse.data_start)
-        lastest_record = max(
-            lastest_record, datetime.fromtimestamp(onboard_date / 1000)
-        )
-        if signal - lastest_record < timedelta(days=1):
-            logger.debug(f"{code}: info up-to-date, skip")
-            return "skip", None
-        query = code[:-4]
-        cg_id = self.gecko_id_mapper.get_coingecko_id(query, exact_match=True)
-        if cg_id is None:
-            return "error", None
-        if cg_id == "":
-            logger.debug(f"{code}: fetched info (no coingecko id)")
-            return "ok", pd.DataFrame(
-                {
-                    "datetime": [signal],
-                    "code": [code],
-                    "total_supply": None,
-                    "market_cap_fdv_ratio": None,
-                }
-            )
-        data = get_coin_market_data(cg_id)
-        if data is None:
-            return "error", None
-        total_supply = data.get("total_supply", None)
-        market_cap_fdv_ratio = data.get("market_cap_fdv_ratio", None)
-        logger.debug(
-            f"{code}: fetched info "
-            f"(total_supply={total_supply}, mcap_fdv_ratio={market_cap_fdv_ratio})"
-        )
-        return "ok", pd.DataFrame(
-            {
-                "datetime": [signal],
-                "code": [code],
-                "total_supply": [total_supply],
-                "market_cap_fdv_ratio": [market_cap_fdv_ratio],
-            }
-        )
+    # ── CMC 供应量查询：替换旧的 per-symbol CoinGecko 逻辑 ──
+
+    @staticmethod
+    def _strip_quote(symbol: str) -> str:
+        """从 Binance 交易对中提取 baseAsset。
+
+        BTCUSDT → BTC
+        1000PEPEUSDT → PEPE
+        """
+        for q in ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"):
+            if symbol.endswith(q) and len(symbol) > len(q):
+                base = symbol[: -len(q)]
+                for prefix in ("1000", "100", "1MIL"):
+                    if base.startswith(prefix):
+                        return base[len(prefix):]
+                return base
+        return symbol
 
     def __sync_futures_info(
         self, signal, table: FutureInfo, symbols, res_dict: dict, workers: int = 1
     ):
+        """从 CMC 批量查询代币供应量（替代旧的 CoinGecko per-symbol 查询）。
+
+        频率控制：同一标的同一天内已有数据则跳过（一天一更新）。
+        映射缓存：symbol ↔ cmc_id 映射持久化，30 天重验证 discriminator。
+        """
         tid = threading.current_thread().ident
         res_dict[tid] = False
         if signal is None:
             signal = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
+
+        # 1. 读取已有记录的最新时间
         info_df = self.clickhouse.read_latest_n_record(
             table.__tablename__, signal - timedelta(days=30), signal, 1
         )
@@ -708,47 +699,101 @@ class FuturesHelper:
             for _, row in info_df.iterrows():
                 latest_records_map[row["code"]] = row["datetime"]
 
-        info_dfs = []
-        inner_workers = min(len(symbols), workers)
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=inner_workers
-        ) as executor:
-            future_map = {}
-            for symbol in symbols:
-                code = symbol["pair"]
-                future = executor.submit(
-                    self.__fetch_single_info,
-                    signal,
-                    code,
-                    symbol["onboardDate"],
-                    latest_records_map,
+        # 2. 筛选当天尚未同步的标的（一天一更新）
+        stale_symbols = []
+        for symbol in symbols:
+            code = symbol["pair"]
+            onboard = datetime.fromtimestamp(symbol["onboardDate"] / 1000)
+            last = latest_records_map.get(code, self.clickhouse.data_start)
+            last = max(last, onboard)
+            if last.date() == signal.date():
+                logger.debug(f"{code}: already synced today ({last.date()}), skip")
+                continue
+            stale_symbols.append(code)
+
+        if not stale_symbols:
+            logger.info("All symbols up-to-date for today, skip")
+            res_dict[tid] = True
+            return
+
+        # 3. 收集所有 baseAsset，检查映射缓存
+        all_base_assets = set()
+        for code in stale_symbols:
+            all_base_assets.add(self._strip_quote(code))
+
+        need_resolve = []
+        base_to_mapping = {}
+        for base in all_base_assets:
+            cached = self.cmc_client.get_cached_mapping(base)
+            if cached is not None:
+                base_to_mapping[base] = cached
+            else:
+                need_resolve.append(base)
+
+        # 4. 解析未缓存的映射（首次运行或新增币）
+        if need_resolve:
+            logger.info(f"Resolving {len(need_resolve)} uncached symbols...")
+            new_mappings = self.cmc_client.resolve_mapping(need_resolve)
+            self.cmc_client._update_cache(new_mappings, need_resolve)
+            for base, mapping in new_mappings.items():
+                base_to_mapping[base] = mapping
+
+        # 5. 定期重验证（30 天一次，比对 discriminator）
+        if self.cmc_client.needs_re_validate():
+            logger.info("Running periodic mapping re-validation...")
+            changes = self.cmc_client.validate_mappings()
+            for change in changes:
+                base = change["base_asset"]
+                refreshed = self.cmc_client.get_cached_mapping(base)
+                if refreshed:
+                    base_to_mapping[base] = refreshed
+
+        # 6. 按 id 查供应量（日常同步核心：2 次 HTTP）
+        cmc_ids = [v["cmc_id"] for v in base_to_mapping.values() if v]
+        quotes = self.cmc_client.batch_quotes_by_id(cmc_ids)
+
+        # 7. 构造 ClickHouse 记录
+        info_records = []
+        for code in stale_symbols:
+            base = self._strip_quote(code)
+            mapping = base_to_mapping.get(base)
+
+            if mapping is None:
+                logger.debug(f"{code}: no CMC mapping, write None")
+                info_records.append({
+                    "datetime": signal, "code": code,
+                    "total_supply": None, "market_cap_fdv_ratio": None,
+                })
+                continue
+
+            info = quotes.get(mapping["cmc_id"])
+            if info and info.get("total_supply") and info.get("market_cap"):
+                price = info["quote"]["USD"]["price"]
+                total_supply = info["total_supply"]
+                market_cap = info["market_cap"]
+                mcap_fdv_ratio = (
+                    market_cap / (total_supply * price)
+                    if total_supply and price else None
                 )
-                future_map[future] = code
+            else:
+                total_supply = None
+                mcap_fdv_ratio = None
 
-            count = 0
-            for future in concurrent.futures.as_completed(future_map):
-                code = future_map[future]
-                try:
-                    status, df = future.result()
-                    if status == "skip":
-                        count += 1
-                        continue
-                    if status == "ok":
-                        info_dfs.append(df)
-                        count += 1
-                    # "error" → don't count
-                except Exception as e:
-                    logger.error(
-                        f"futures helper sync info inner task failed for {code}: {e}"
-                    )
+            info_records.append({
+                "datetime": signal, "code": code,
+                "total_supply": total_supply,
+                "market_cap_fdv_ratio": mcap_fdv_ratio,
+            })
 
-        if info_dfs:
-            merged_df = pd.concat(info_dfs, ignore_index=True)
+        # 8. 批量写入 ClickHouse
+        if info_records:
+            merged_df = pd.DataFrame(info_records)
             self.clickhouse.save_to_db(table, merged_df, None)
         logger.info(
-            f"info sync done: {count}/{len(symbols)} symbols " f"processed, saved to DB"
+            f"info sync done: {len(info_records)}/{len(stale_symbols)} "
+            f"symbols processed, saved to DB"
         )
-        res_dict[tid] = count == len(symbols)
+        res_dict[tid] = True
 
     def __fetch_single_funding_rate(
         self,
