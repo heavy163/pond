@@ -1,6 +1,6 @@
 from sqlalchemy import Column, func
 from clickhouse_sqlalchemy import types, engines
-from pond.clickhouse import TsTable
+from pond.clickhouse import TsTable, Base
 
 import akshare as ak
 
@@ -567,5 +567,58 @@ class FundNetValue(TsTable):
             partition_by=func.toYYYYMM(datetime),
             order_by=(datetime, code),
             primary_key=(datetime, code),
+        ),
+    )
+
+
+class TokenUnlock(Base):
+    """
+    代币解锁信息表
+
+    每个解锁事件全局唯一一行，由 ReplacingMergeTree 按
+    (symbol, platform, contract_address, next_unlock_time) 四字段去重。
+
+    不继承 TsTable，因为 TsTable 强制 datetime 为主键和排序列，
+    而此表需要自定义 ORDER BY 以支持按解锁事件去重。
+    """
+
+    __tablename__ = "token_unlock"
+
+    symbol = Column(types.String, comment="CMC 代币符号 (如 ZRO)", primary_key=True)
+    platform = Column(
+        types.String, comment="区块链平台 (如 ethereum)", primary_key=True
+    )
+    contract_address = Column(
+        types.String, comment="合约地址 (原生币填 0x0)", primary_key=True
+    )
+    next_unlock_time = Column(
+        types.DateTime64, comment="下次解锁时间 (UTC)", primary_key=True
+    )
+
+    slug = Column(types.String, comment="CMC slug (如 layerzero)")
+    crypto_id = Column(types.Int64, comment="CMC cryptoId")
+    name = Column(types.String, comment="项目全称")
+
+    total_unlocked_pct = Column(types.Float64, comment="已解锁占总供应量 %")
+    next_unlock_amount = Column(types.Float64, comment="下次解锁数量")
+    next_unlock_amount_usd = Column(types.Float64, comment="下次解锁价值 USD")
+    next_unlock_pct = Column(types.Float64, comment="下次解锁占锁仓 %")
+
+    circulating_supply = Column(types.Float64, comment="当前流通量")
+    price = Column(types.Float64, comment="当前价格 USD")
+    market_cap = Column(types.Float64, comment="当前市值 USD")
+
+    binance_code = Column(
+        types.String, comment="币安合约代码 (如 ZROUSDT，无映射则为空)"
+    )
+
+    synced_at = Column(types.DateTime64, comment="本次同步时间 (UTC)")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYYYYMM(next_unlock_time),
+            order_by=(symbol, platform, contract_address, next_unlock_time),
+            primary_key=(symbol, platform, contract_address, next_unlock_time),
+            version=synced_at,
         ),
     )

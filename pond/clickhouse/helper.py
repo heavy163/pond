@@ -32,6 +32,7 @@ from pond.utils.times import (
     timeframe2minutes,
 )
 from pond.cmc import CMCMarketDataClient
+from pond.token_unlock import CMCUnlockClient, UnlockFilter
 from pond.coin_gecko.id_mapper import CoinGeckoIDMapper
 from pond.coin_gecko.contract_info import BinanceContractTool
 from pond.chain_base.client import ChainbaseClient
@@ -43,8 +44,6 @@ from pond.binance_history.futures_api import (
 )
 from binance.client import Client
 from pond.binance_history.websocket_client import BinanceWSClientWrapper
-from loguru import logger
-from pathlib import Path
 
 
 class DataProxy:
@@ -280,6 +279,8 @@ class FuturesHelper:
             self.__sync_futures_base_asset_holders(
                 table, symbols, interval, res_dict, workers
             )
+        elif what == "token_unlock":
+            self.__sync_token_unlock(90, signal, res_dict)
         else:
             self.__sync_futures_extra_info(
                 what, signal, symbols, interval, allow_missing_count, res_dict, workers
@@ -662,6 +663,15 @@ class FuturesHelper:
 
     # ── CMC 供应量查询：替换旧的 per-symbol CoinGecko 逻辑 ──
 
+    def _resolve_platform(self, symbol: str) -> tuple[str, str]:
+        mapping = self.cmc_client.get_cached_mapping(symbol)
+        if mapping is None:
+            return ("unknown", "0x0")
+        return (
+            mapping.get("chain", "unknown") or "unknown",
+            mapping.get("contract_address", "0x0") or "0x0",
+        )
+
     @staticmethod
     def _strip_quote(symbol: str) -> str:
         """从 Binance 交易对中提取 baseAsset。
@@ -674,7 +684,7 @@ class FuturesHelper:
                 base = symbol[: -len(q)]
                 for prefix in ("1000", "100", "1MIL"):
                     if base.startswith(prefix):
-                        return base[len(prefix):]
+                        return base[len(prefix) :]
                 return base
         return symbol
 
@@ -761,10 +771,14 @@ class FuturesHelper:
 
             if mapping is None:
                 logger.debug(f"{code}: no CMC mapping, write None")
-                info_records.append({
-                    "datetime": signal, "code": code,
-                    "total_supply": None, "market_cap_fdv_ratio": None,
-                })
+                info_records.append(
+                    {
+                        "datetime": signal,
+                        "code": code,
+                        "total_supply": None,
+                        "market_cap_fdv_ratio": None,
+                    }
+                )
                 continue
 
             info = quotes.get(mapping["cmc_id"])
@@ -781,11 +795,14 @@ class FuturesHelper:
                 total_supply = None
                 mcap_fdv_ratio = None
 
-            info_records.append({
-                "datetime": signal, "code": code,
-                "total_supply": total_supply,
-                "market_cap_fdv_ratio": mcap_fdv_ratio,
-            })
+            info_records.append(
+                {
+                    "datetime": signal,
+                    "code": code,
+                    "total_supply": total_supply,
+                    "market_cap_fdv_ratio": mcap_fdv_ratio,
+                }
+            )
 
         # 8. 批量写入 ClickHouse
         if info_records:
@@ -1245,6 +1262,182 @@ class FuturesHelper:
             .over("jj_code", order_by="close_time")
         )
         return df
+
+    # ═══════════════════════════════════════════════════════════════
+    #  代币解锁同步
+    # ═══════════════════════════════════════════════════════════════
+
+    def sync_token_unlock(
+        self,
+        window_days: int = 90,
+        signal: datetime | None = None,
+    ) -> bool:
+        """同步代币解锁数据到 ClickHouse
+
+        幂等，可任意多次调用。ReplacingMergeTree 按
+        (symbol, platform, contract_address, next_unlock_time) 自动去重，
+        保留 synced_at 最大的一行。
+
+        Args:
+            window_days: 未来窗口天数，只同步此窗口内的解锁。默认 90 天。
+            signal: 同步时间戳。
+        """
+        res_dict = {}
+        self.__sync_token_unlock(window_days, signal, res_dict)
+        for tid in res_dict:
+            if not res_dict[tid]:
+                return False
+        return True
+
+    def __sync_token_unlock(self, window_days, signal, res_dict):
+        tid = threading.current_thread().ident
+        res_dict[tid] = False
+        signal = signal or datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
+
+        client = CMCUnlockClient()
+        entries = client.fetch_upcoming_by_window(window_days=window_days)
+        if not entries:
+            logger.warning("token_unlock: no data from CMC")
+            res_dict[tid] = True
+            return
+
+        uf = UnlockFilter()
+        binance_symbols = uf._get_binance_futures_symbols()
+        binance_base_set = set(binance_symbols)
+        cmc_to_binance = uf._build_symbol_map(entries, binance_base_set)
+
+        need_resolve = {e.symbol for e in entries if e.next_unlock}
+        cached = {s for s in need_resolve if self.cmc_client.get_cached_mapping(s)}
+        uncached = list(need_resolve - cached)
+        if uncached:
+            logger.info(f"token_unlock: resolving {len(uncached)} symbols...")
+            new_mappings = self.cmc_client.resolve_mapping(uncached)
+            self.cmc_client._update_cache(new_mappings, uncached)
+
+        rows = []
+        for entry in entries:
+            if not entry.next_unlock:
+                continue
+            platform, contract_addr = self._resolve_platform(entry.symbol)
+            rows.append(
+                {
+                    "symbol": entry.symbol,
+                    "platform": platform,
+                    "contract_address": contract_addr,
+                    "next_unlock_time": entry.next_unlock.date,
+                    "slug": entry.slug,
+                    "crypto_id": entry.crypto_id,
+                    "name": entry.name,
+                    "total_unlocked_pct": entry.total_unlocked_pct,
+                    "next_unlock_amount": entry.next_unlock.token_amount,
+                    "next_unlock_amount_usd": entry.next_unlock.token_amount_usd,
+                    "next_unlock_pct": entry.next_unlock.token_amount_pct,
+                    "circulating_supply": entry.circulating_supply,
+                    "price": entry.price or 0.0,
+                    "market_cap": entry.market_cap or 0.0,
+                    "binance_code": cmc_to_binance.get(entry.symbol, ""),
+                    "synced_at": signal,
+                }
+            )
+
+        # 第二遍：补查 listing 遗漏的币安永续代币（如 BANK）
+        # 部分代币有解锁数据但 CMC listing 接口不返回，需通过 detail 端点逐个查询
+        listed_cmc_ids = {e.crypto_id for e in entries if e.next_unlock}
+        listed_symbols = {e.symbol for e in entries if e.next_unlock}
+        cutoff = datetime.now(tz=dtm.timezone.utc) + timedelta(days=window_days)
+        binance_bases: set[str] = set()
+        for s in binance_symbols:
+            if s.endswith("USDT"):
+                binance_bases.add(s[:-4])
+        MAX_DETAIL = 700
+        detail_checked = 0
+        for base_asset, info in self.cmc_client.cache.get("symbols", {}).items():
+            if detail_checked >= MAX_DETAIL:
+                break
+            cmc_id = info.get("cmc_id")
+            if not cmc_id or cmc_id in listed_cmc_ids:
+                continue
+            if base_asset in listed_symbols:
+                continue
+            bn_base = uf.symbol_overrides.get(base_asset, base_asset)
+            if bn_base not in binance_bases:
+                continue
+            detail_checked += 1
+            detail_entry = client.fetch_detail(cmc_id)
+            if not detail_entry or not detail_entry.next_unlock:
+                continue
+            if detail_entry.next_unlock.date > cutoff:
+                continue
+            platform, contract_addr = self._resolve_platform(base_asset)
+            rows.append(
+                {
+                    "symbol": detail_entry.symbol,
+                    "platform": platform,
+                    "contract_address": contract_addr,
+                    "next_unlock_time": detail_entry.next_unlock.date,
+                    "slug": detail_entry.slug,
+                    "crypto_id": detail_entry.crypto_id,
+                    "name": detail_entry.name,
+                    "total_unlocked_pct": detail_entry.total_unlocked_pct,
+                    "next_unlock_amount": detail_entry.next_unlock.token_amount,
+                    "next_unlock_amount_usd": detail_entry.next_unlock.token_amount_usd,
+                    "next_unlock_pct": detail_entry.next_unlock.token_amount_pct,
+                    "circulating_supply": detail_entry.circulating_supply,
+                    "price": detail_entry.price or 0.0,
+                    "market_cap": detail_entry.market_cap or 0.0,
+                    "binance_code": f"{bn_base}USDT",
+                    "synced_at": signal,
+                }
+            )
+            logger.info(f"token_unlock: fallback detail found {base_asset} (#{cmc_id})")
+
+        if detail_checked:
+            logger.info(
+                f"token_unlock: fallback checked {detail_checked} cached symbols"
+            )
+
+        if rows:
+            df = pd.DataFrame(rows)
+            self.clickhouse.save_dataframe("token_unlock", df)
+            logger.info(f"token_unlock: saved {len(rows)} rows")
+
+        res_dict[tid] = True
+
+    def get_token_unlock_exclusions(
+        self,
+        window_days: int = 14,
+        min_unlock_pct: float = 1.0,
+        min_market_cap: float = 10_000_000,
+    ) -> pd.DataFrame:
+        """从 ClickHouse 获取窗口内大额解锁事件
+
+        Args:
+            window_days: 窗口天数，默认 14 天。
+            min_unlock_pct: 最小解锁占比，默认 1.0%。
+            min_market_cap: 最小市值 USD，默认 1000 万。
+
+        Returns:
+            DataFrame，包含 binance_code, symbol, next_unlock_time, next_unlock_pct,
+            next_unlock_amount_usd, market_cap 等字段。调用方自行决定取哪些字段。
+        """
+        sql = """
+            SELECT *
+            FROM token_unlock FINAL
+            WHERE next_unlock_time >= now()
+              AND next_unlock_time <= now() + INTERVAL :window DAY
+              AND next_unlock_pct >= :min_pct
+              AND binance_code != ''
+              AND market_cap >= :min_mcap
+            ORDER BY next_unlock_amount_usd DESC
+        """
+        return self.clickhouse.native_sql_read_table(
+            sql,
+            {
+                "window": window_days,
+                "min_pct": min_unlock_pct,
+                "min_mcap": min_market_cap,
+            },
+        )
 
 
 if __name__ == "__main__":

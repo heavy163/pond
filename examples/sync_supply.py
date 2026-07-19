@@ -32,7 +32,9 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-
+from pond.clickhouse.helper import FuturesHelper, DirectDataProxy
+from pond.clickhouse.kline import FutureInfo
+from pond.duckdb.crypto import CryptoDB
 import pandas as pd
 from loguru import logger
 
@@ -42,15 +44,12 @@ _PROJECT_ROOT = _THIS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from pond.clickhouse.helper import FuturesHelper, DirectDataProxy
-from pond.clickhouse.kline import FutureInfo
-from pond.duckdb.crypto import CryptoDB
 
-_INI_PATH = _PROJECT_ROOT / "env.ini"
+_INI_PATH = _PROJECT_ROOT / ".env.ini"
 
 
 def _load_env_ini():
-    """如果环境变量未设置，从 env.ini 读取作为 fallback。"""
+    """如果环境变量未设置，从 .env.ini 读取作为 fallback。"""
     ini = _INI_PATH
     if not ini.exists():
         return
@@ -96,7 +95,7 @@ def main():
         fix_kline_with_cryptodb=False,
     )
 
-    # 代理配置：env.ini 中有值则用代理，否则直连
+    # 代理配置：.env.ini 中有值则用代理，否则直连
     proxy_host = os.environ.get("PROXY_HOST")
     proxy_port = os.environ.get("PROXY_PORT")
     if proxy_host and proxy_port:
