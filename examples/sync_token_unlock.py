@@ -37,14 +37,15 @@ from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
-from pond.clickhouse.helper import FuturesHelper, DirectDataProxy
-from pond.clickhouse.manager import ClickHouseManager
-from pond.duckdb.crypto import CryptoDB
 
 _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _THIS_DIR.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+from pond.clickhouse.helper import FuturesHelper, DirectDataProxy
+from pond.clickhouse.manager import ClickHouseManager
+from pond.duckdb.crypto import CryptoDB
 
 
 _INI_PATH = _PROJECT_ROOT / ".env.ini"

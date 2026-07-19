@@ -1340,8 +1340,16 @@ class FuturesHelper:
                 }
             )
 
-        # 第二遍：补查 listing 遗漏的币安永续代币（如 BANK）
-        # 部分代币有解锁数据但 CMC listing 接口不返回，需通过 detail 端点逐个查询
+        # --- 第一阶段：保存 listing 结果（即使后面 fallback 失败也已落地） ---
+        listing_rows = rows
+        rows = []
+        if listing_rows:
+            df = pd.DataFrame(listing_rows)
+            self.clickhouse.save_dataframe("token_unlock", df)
+            logger.info(f"token_unlock: saved {len(listing_rows)} listing rows")
+
+        # --- 第二阶段：补查 listing 遗漏的币安永续代币（如 BANK） ---
+        # 逐个查询 /detail 端点，单点失败不影响已保存的 listing 数据
         listed_cmc_ids = {e.crypto_id for e in entries if e.next_unlock}
         listed_symbols = {e.symbol for e in entries if e.next_unlock}
         cutoff = datetime.now(tz=dtm.timezone.utc) + timedelta(days=window_days)
@@ -1349,10 +1357,12 @@ class FuturesHelper:
         for s in binance_symbols:
             if s.endswith("USDT"):
                 binance_bases.add(s[:-4])
-        MAX_DETAIL = 700
+        fallback_rows = []
         detail_checked = 0
+        detail_found = 0
+        BATCH_SIZE = 50
         for base_asset, info in self.cmc_client.cache.get("symbols", {}).items():
-            if detail_checked >= MAX_DETAIL:
+            if detail_checked >= 700:
                 break
             cmc_id = info.get("cmc_id")
             if not cmc_id or cmc_id in listed_cmc_ids:
@@ -1363,43 +1373,50 @@ class FuturesHelper:
             if bn_base not in binance_bases:
                 continue
             detail_checked += 1
-            detail_entry = client.fetch_detail(cmc_id)
-            if not detail_entry or not detail_entry.next_unlock:
-                continue
-            if detail_entry.next_unlock.date > cutoff:
+            try:
+                detail_entry = client.fetch_detail(cmc_id)
+                if not detail_entry or not detail_entry.next_unlock:
+                    continue
+                if detail_entry.next_unlock.date > cutoff:
+                    continue
+            except Exception:
+                logger.warning(f"token_unlock: fallback detail failed for {base_asset} (#{cmc_id})")
                 continue
             platform, contract_addr = self._resolve_platform(base_asset)
-            rows.append(
-                {
-                    "symbol": detail_entry.symbol,
-                    "platform": platform,
-                    "contract_address": contract_addr,
-                    "next_unlock_time": detail_entry.next_unlock.date,
-                    "slug": detail_entry.slug,
-                    "crypto_id": detail_entry.crypto_id,
-                    "name": detail_entry.name,
-                    "total_unlocked_pct": detail_entry.total_unlocked_pct,
-                    "next_unlock_amount": detail_entry.next_unlock.token_amount,
-                    "next_unlock_amount_usd": detail_entry.next_unlock.token_amount_usd,
-                    "next_unlock_pct": detail_entry.next_unlock.token_amount_pct,
-                    "circulating_supply": detail_entry.circulating_supply,
-                    "price": detail_entry.price or 0.0,
-                    "market_cap": detail_entry.market_cap or 0.0,
-                    "binance_code": f"{bn_base}USDT",
-                    "synced_at": signal,
-                }
-            )
-            logger.info(f"token_unlock: fallback detail found {base_asset} (#{cmc_id})")
+            fallback_rows.append({
+                "symbol": detail_entry.symbol,
+                "platform": platform,
+                "contract_address": contract_addr,
+                "next_unlock_time": detail_entry.next_unlock.date,
+                "slug": detail_entry.slug,
+                "crypto_id": detail_entry.crypto_id,
+                "name": detail_entry.name,
+                "total_unlocked_pct": detail_entry.total_unlocked_pct,
+                "next_unlock_amount": detail_entry.next_unlock.token_amount,
+                "next_unlock_amount_usd": detail_entry.next_unlock.token_amount_usd,
+                "next_unlock_pct": detail_entry.next_unlock.token_amount_pct,
+                "circulating_supply": detail_entry.circulating_supply,
+                "price": detail_entry.price or 0.0,
+                "market_cap": detail_entry.market_cap or 0.0,
+                "binance_code": f"{bn_base}USDT",
+                "synced_at": signal,
+            })
+            detail_found += 1
+            if len(fallback_rows) >= BATCH_SIZE:
+                df = pd.DataFrame(fallback_rows)
+                self.clickhouse.save_dataframe("token_unlock", df)
+                logger.info(f"token_unlock: saved {len(fallback_rows)} fallback rows (batch)")
+                fallback_rows = []
+
+        if fallback_rows:
+            df = pd.DataFrame(fallback_rows)
+            self.clickhouse.save_dataframe("token_unlock", df)
+            logger.info(f"token_unlock: saved {len(fallback_rows)} fallback rows (final)")
 
         if detail_checked:
             logger.info(
-                f"token_unlock: fallback checked {detail_checked} cached symbols"
+                f"token_unlock: fallback checked {detail_checked}, found {detail_found}"
             )
-
-        if rows:
-            df = pd.DataFrame(rows)
-            self.clickhouse.save_dataframe("token_unlock", df)
-            logger.info(f"token_unlock: saved {len(rows)} rows")
 
         res_dict[tid] = True
 
