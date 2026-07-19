@@ -622,3 +622,56 @@ class TokenUnlock(Base):
             version=synced_at,
         ),
     )
+
+
+class TokenLiquidity(Base):
+    """
+    代币 DEX 流动性快照表
+
+    每个代币在各链各 DEX 上的流动性池全局唯一一行，
+    由 ReplacingMergeTree 按 (symbol, chain, dex_id, pair_address) 四字段去重。
+    """
+
+    __tablename__ = "token_liquidity"
+
+    symbol          = Column(types.String,    comment="代币符号 (如 ZRO)", primary_key=True)
+    chain           = Column(types.String,    comment="链标识 (ethereum, bsc, solana)", primary_key=True)
+    dex_id          = Column(types.String,    comment="DEX 标识 (uniswap_v3, pancakeswap)", primary_key=True)
+    pair_address    = Column(types.String,    comment="池合约地址", primary_key=True)
+
+    base_token      = Column(types.String,    comment="base token 地址")
+    base_token_name = Column(types.String,    comment="base token 名称")
+    quote_token     = Column(types.String,    comment="quote token 地址")
+    quote_token_name = Column(types.String,   comment="quote token 名称")
+    pair_created_at = Column(types.DateTime64, comment="池创建时间")
+
+    liquidity_usd   = Column(types.Float64,   comment="池总流动性 USD")
+    liquidity_base  = Column(types.Float64,   comment="base token 流动性数量")
+    liquidity_quote = Column(types.Float64,   comment="quote token 流动性数量")
+
+    volume_h24      = Column(types.Float64,   comment="24h 交易量 USD")
+    volume_h6       = Column(types.Float64,   comment="6h 交易量 USD")
+    volume_h1       = Column(types.Float64,   comment="1h 交易量 USD")
+    txns_buys_h24   = Column(types.Int64,     comment="24h 买单数")
+    txns_sells_h24  = Column(types.Int64,     comment="24h 卖单数")
+
+    price_usd       = Column(types.Float64,   comment="当前价格 USD")
+    price_native    = Column(types.Float64,   comment="当前价格 (原生代币)")
+    fdv             = Column(types.Float64,   comment="全稀释估值 USD")
+    market_cap      = Column(types.Float64,   comment="市值 USD")
+
+    price_change_h24 = Column(types.Float64,  comment="24h 价格变化 %")
+    price_change_h6  = Column(types.Float64,  comment="6h 价格变化 %")
+    price_change_h1  = Column(types.Float64,  comment="1h 价格变化 %")
+    price_change_m5  = Column(types.Float64,  comment="5m 价格变化 %")
+
+    synced_at       = Column(types.DateTime64, comment="本次同步时间 (UTC)")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYYYYMM(synced_at),
+            order_by=(symbol, chain, dex_id, pair_address),
+            primary_key=(symbol, chain, dex_id, pair_address),
+            version=synced_at,
+        ),
+    )

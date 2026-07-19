@@ -21,6 +21,7 @@ from pond.clickhouse.kline import (
     FutureLongShortPositionRatio,
 )
 import threading
+import requests
 import pandas as pd
 from loguru import logger
 from pathlib import Path
@@ -281,6 +282,8 @@ class FuturesHelper:
             )
         elif what == "token_unlock":
             self.__sync_token_unlock(90, signal, res_dict)
+        elif what == "token_liquidity":
+            self.__sync_token_liquidity(signal, res_dict)
         else:
             self.__sync_futures_extra_info(
                 what, signal, symbols, interval, allow_missing_count, res_dict, workers
@@ -1455,6 +1458,121 @@ class FuturesHelper:
                 "min_mcap": min_market_cap,
             },
         )
+
+    # ═══════════════════════════════════════════════════════════════
+    #  代币 DEX 流动性同步
+    # ═══════════════════════════════════════════════════════════════
+
+    def sync_token_liquidity(self, signal: datetime | None = None) -> bool:
+        """同步代币 DEX 流动性数据到 ClickHouse
+
+        对所有币安 USDT 永续合约标的，通过 DEX Screener 查询其 DEX 流动性。
+        DEX Screener 限速 60 req/min，约 665 个标的需 ~11 分钟。
+        """
+        res_dict = {}
+        self.__sync_token_liquidity(signal, res_dict)
+        for tid in res_dict:
+            if not res_dict[tid]:
+                return False
+        return True
+
+    def __sync_token_liquidity(self, signal, res_dict):
+        tid = threading.current_thread().ident
+        res_dict[tid] = False
+        signal = signal or datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
+
+        symbols = self.get_perpetual_symbols(signal)
+        if not symbols:
+            logger.warning("token_liquidity: no perpetual symbols")
+            res_dict[tid] = True
+            return
+
+        base_assets = list({self._strip_quote(s["pair"]) for s in symbols})
+        logger.info(f"token_liquidity: {len(base_assets)} base assets")
+
+        session = requests.Session()
+        session.headers.update({
+            "Accept": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        })
+        SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
+
+        rows = []
+        for i, base in enumerate(base_assets):
+            try:
+                resp = session.get(SEARCH_URL, params={"q": base}, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.debug(f"token_liquidity: search failed for {base}: {e}")
+                continue
+
+            pairs = data.get("pairs", [])
+            if not pairs:
+                continue
+
+            pairs.sort(
+                key=lambda p: float(
+                    (p.get("liquidity") or {}).get("usd", 0) or 0
+                ),
+                reverse=True,
+            )
+            for pair in pairs[:5]:
+                rows.append({
+                    "symbol": base.upper(),
+                    "chain": pair.get("chainId", ""),
+                    "dex_id": pair.get("dexId", ""),
+                    "pair_address": pair.get("pairAddress", ""),
+                    "base_token": pair.get("baseToken", {}).get("address", ""),
+                    "base_token_name": pair.get("baseToken", {}).get("name", ""),
+                    "quote_token": pair.get("quoteToken", {}).get("address", ""),
+                    "quote_token_name": pair.get("quoteToken", {}).get("name", ""),
+                    "pair_created_at": (
+                        datetime.fromtimestamp(
+                            pair["pairCreatedAt"] / 1000, tz=dtm.timezone.utc
+                        )
+                        if pair.get("pairCreatedAt")
+                        else None
+                    ),
+                    "liquidity_usd": float((pair.get("liquidity") or {}).get("usd", 0) or 0),
+                    "liquidity_base": float((pair.get("liquidity") or {}).get("base", 0) or 0),
+                    "liquidity_quote": float((pair.get("liquidity") or {}).get("quote", 0) or 0),
+                    "volume_h24": float((pair.get("volume") or {}).get("h24", 0) or 0),
+                    "volume_h6": float((pair.get("volume") or {}).get("h6", 0) or 0),
+                    "volume_h1": float((pair.get("volume") or {}).get("h1", 0) or 0),
+                    "txns_buys_h24": int(((pair.get("txns") or {}).get("h24") or {}).get("buys", 0) or 0),
+                    "txns_sells_h24": int(((pair.get("txns") or {}).get("h24") or {}).get("sells", 0) or 0),
+                    "price_usd": float(pair.get("priceUsd", 0) or 0),
+                    "price_native": float(pair.get("priceNative", 0) or 0),
+                    "fdv": float(pair.get("fdv", 0) or 0),
+                    "market_cap": float(pair.get("marketCap", 0) or 0),
+                    "price_change_h24": float((pair.get("priceChange") or {}).get("h24", 0) or 0),
+                    "price_change_h6": float((pair.get("priceChange") or {}).get("h6", 0) or 0),
+                    "price_change_h1": float((pair.get("priceChange") or {}).get("h1", 0) or 0),
+                    "price_change_m5": float((pair.get("priceChange") or {}).get("m5", 0) or 0),
+                    "synced_at": signal,
+                })
+
+            if i > 0 and i % 55 == 0:
+                logger.info(
+                    f"token_liquidity: {i}/{len(base_assets)}, rate limit pause 60s..."
+                )
+                time.sleep(60)
+
+        if rows:
+            for i in range(0, len(rows), 100):
+                batch = rows[i : i + 100]
+                df = pd.DataFrame(batch)
+                self.clickhouse.save_dataframe("token_liquidity", df)
+            logger.info(f"token_liquidity: saved {len(rows)} rows")
+        else:
+            logger.warning("token_liquidity: no data")
+
+        res_dict[tid] = True
 
 
 if __name__ == "__main__":
