@@ -1481,7 +1481,22 @@ class FuturesHelper:
         res_dict[tid] = False
         signal = signal or datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
 
-        symbols = self.get_perpetual_symbols(signal)
+        # DEX Screener 直连无需代理，使用独立 UMFutures 客户端获取合约列表
+        from binance.um_futures import UMFutures
+        _um = UMFutures()
+        try:
+            _info = _um.exchange_info()
+        except Exception as e:
+            logger.error(f"token_liquidity: failed to fetch exchange info: {e}")
+            res_dict[tid] = True
+            return
+        _symbols = [
+            s for s in _info.get("symbols", [])
+            if s["contractType"] == "PERPETUAL"
+            and s["pair"].endswith("USDT")
+            and s["status"] == "TRADING"
+        ]
+        symbols = _symbols
         if not symbols:
             logger.warning("token_liquidity: no perpetual symbols")
             res_dict[tid] = True
