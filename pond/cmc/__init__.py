@@ -12,6 +12,7 @@ CoinMarketCap API 客户端：批量查询代币供应量 + 合约地址消歧 +
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -25,8 +26,9 @@ class CMCMarketDataClient:
     """封装 CMC API 调用 + 持久缓存"""
 
     BASE_URL = "https://pro-api.coinmarketcap.com"
-    QUOTES_PATH = "/v3/cryptocurrency/quotes/latest"
+    QUOTES_PATH = "/v2/cryptocurrency/quotes/latest"
     INFO_PATH = "/v2/cryptocurrency/info"
+    LISTINGS_PATH = "/v3/cryptocurrency/listings/latest"
     MAX_SYMBOLS_PER_REQUEST = 100
     CACHE_VERSION = 1
     RE_VALIDATE_INTERVAL_DAYS = 30
@@ -41,13 +43,15 @@ class CMCMarketDataClient:
             raise ValueError(
                 "CMC_PRO_API_KEY not set. Pass api_key= or set env var."
             )
+        self._lock = threading.RLock()
         self.session = requests.Session()
         self.session.headers.update({
             "X-CMC_PRO_API_KEY": self.api_key,
             "Accept": "application/json",
         })
         self.cache_path = Path(cache_path)
-        self.cache = self._load_cache()
+        with self._lock:
+            self.cache = self._load_cache()
 
     # ════════════════════════════════════════════════════════════════
     #  公开 API：供应量查询（每次同步核心，一天一次）
@@ -80,9 +84,9 @@ class CMCMarketDataClient:
     def resolve_mapping(self, base_assets: list[str]) -> dict[str, dict]:
         """对一组 baseAsset 解析其 CMC id + discriminator。
 
-        双重消歧：
-          1. /v2/cryptocurrency/info → 获取每个 symbol 的所有链上变体
-          2. /v3/cryptocurrency/quotes/latest → 按 market_cap 选最高者
+       双重消歧：
+           1. /v2/cryptocurrency/info → 获取每个 symbol 的所有链上变体
+           2. /v2/cryptocurrency/quotes/latest → 按 market_cap 选最高者
 
         返回:
           {
@@ -154,76 +158,77 @@ class CMCMarketDataClient:
           [{"base_asset", "old_discriminator", "new_discriminator",
             "old_cmc_id", "new_cmc_id", "old_name", "new_name"}, ...]
         """
-        if not self.cache.get("symbols"):
-            return []
+        with self._lock:
+            if not self.cache.get("symbols"):
+                return []
 
-        all_bases = list(self.cache["symbols"].keys())
-        logger.info(f"Validating {len(all_bases)} cached mappings...")
+            all_bases = list(self.cache["symbols"].keys())
+            logger.info(f"Validating {len(all_bases)} cached mappings...")
 
-        current_info = self._fetch_info(all_bases)
-        changed = []
+            current_info = self._fetch_info(all_bases)
+            changed = []
 
-        for base_asset, entry in self.cache["symbols"].items():
-            stored_disc = entry["discriminator"]
-            variants = current_info.get(base_asset)
-            if not variants:
-                continue
+            for base_asset, entry in self.cache["symbols"].items():
+                stored_disc = entry["discriminator"]
+                variants = current_info.get(base_asset)
+                if not variants:
+                    continue
 
-            # 按市值取最佳变体
-            quotes = self.batch_quotes_by_id([v["id"] for v in variants])
-            best = max(
-                variants,
-                key=lambda v: (
-                    quotes.get(v["id"], {})
-                    .get("quote", {})
-                    .get("USD", {})
-                    .get("market_cap", 0)
-                    or 0
-                ),
-            )
-            current_disc = self._build_discriminator(
-                base_asset, best.get("platform")
-            )
-
-            if stored_disc != current_disc:
-                changed.append({
-                    "base_asset": base_asset,
-                    "old_discriminator": stored_disc,
-                    "new_discriminator": current_disc,
-                    "old_cmc_id": entry["cmc_id"],
-                    "new_cmc_id": best["id"],
-                    "old_name": entry.get("name"),
-                    "new_name": best.get("name"),
-                })
-                # 自动更新
-                platform = best.get("platform")
-                entry["cmc_id"] = best["id"]
-                entry["name"] = best.get("name")
-                entry["discriminator"] = current_disc
-                entry["chain"] = platform.get("slug") if platform else None
-                entry["contract_address"] = (
-                    platform.get("token_address") if platform else None
+                # 按市值取最佳变体
+                quotes = self.batch_quotes_by_id([v["id"] for v in variants])
+                best = max(
+                    variants,
+                    key=lambda v: (
+                        quotes.get(v["id"], {})
+                        .get("quote", {})
+                        .get("USD", {})
+                        .get("market_cap", 0)
+                        or 0
+                    ),
                 )
-                entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
+                current_disc = self._build_discriminator(
+                    base_asset, best.get("platform")
+                )
 
-                by_disc = self.cache.setdefault("by_discriminator", {})
-                if stored_disc in by_disc:
-                    del by_disc[stored_disc]
-                by_disc[current_disc] = base_asset
+                if stored_disc != current_disc:
+                    changed.append({
+                        "base_asset": base_asset,
+                        "old_discriminator": stored_disc,
+                        "new_discriminator": current_disc,
+                        "old_cmc_id": entry["cmc_id"],
+                        "new_cmc_id": best["id"],
+                        "old_name": entry.get("name"),
+                        "new_name": best.get("name"),
+                    })
+                    # 自动更新
+                    platform = best.get("platform")
+                    entry["cmc_id"] = best["id"]
+                    entry["name"] = best.get("name")
+                    entry["discriminator"] = current_disc
+                    entry["chain"] = platform.get("slug") if platform else None
+                    entry["contract_address"] = (
+                        platform.get("token_address") if platform else None
+                    )
+                    entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
+
+                    by_disc = self.cache.setdefault("by_discriminator", {})
+                    if stored_disc in by_disc:
+                        del by_disc[stored_disc]
+                    by_disc[current_disc] = base_asset
+                else:
+                    entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
+
+            self.cache["built_at"] = datetime.now(timezone.utc).isoformat()
+            self._save_cache()
+
+            if changed:
+                logger.warning(
+                    f"Mapping changes detected for {len(changed)} symbols: "
+                    f"{[c['base_asset'] for c in changed]}"
+                )
             else:
-                entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
-
-        self.cache["built_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_cache()
-
-        if changed:
-            logger.warning(
-                f"Mapping changes detected for {len(changed)} symbols: "
-                f"{[c['base_asset'] for c in changed]}"
-            )
-        else:
-            logger.info("All mappings validated, no changes detected")
-        return changed
+                logger.info("All mappings validated, no changes detected")
+            return changed
 
     # ════════════════════════════════════════════════════════════════
     #  缓存管理
@@ -249,27 +254,29 @@ class CMCMarketDataClient:
 
         返回 None 表示未缓存或已知不可解析。
         """
-        entry = self.cache.get("symbols", {}).get(base_asset.upper())
-        if entry:
-            return {
-                "cmc_id": entry["cmc_id"],
-                "discriminator": entry["discriminator"],
-                "chain": entry.get("chain"),
-                "contract_address": entry.get("contract_address"),
-            }
-        if base_asset.upper() in self.cache.get("unresolved", []):
+        with self._lock:
+            entry = self.cache.get("symbols", {}).get(base_asset.upper())
+            if entry:
+                return {
+                    "cmc_id": entry["cmc_id"],
+                    "discriminator": entry["discriminator"],
+                    "chain": entry.get("chain"),
+                    "contract_address": entry.get("contract_address"),
+                }
+            if base_asset.upper() in self.cache.get("unresolved", []):
+                return None
             return None
-        return None
 
     def needs_re_validate(self, interval_days: int | None = None) -> bool:
         """检查是否需要全量重验证"""
-        if interval_days is None:
-            interval_days = self.RE_VALIDATE_INTERVAL_DAYS
-        built_at = self.cache.get("built_at")
-        if not built_at:
-            return True
-        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(built_at)
-        return elapsed > timedelta(days=interval_days)
+        with self._lock:
+            if interval_days is None:
+                interval_days = self.RE_VALIDATE_INTERVAL_DAYS
+            built_at = self.cache.get("built_at")
+            if not built_at:
+                return True
+            elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(built_at)
+            return elapsed > timedelta(days=interval_days)
 
     def _update_cache(self, resolved: dict[str, dict], attempted: list[str]):
         """将解析结果写入缓存，同时维护主索引和 discriminator 索引
@@ -277,31 +284,32 @@ class CMCMarketDataClient:
         调用方保证 resolved 中的所有条目都来自 resolve_mapping() 的有效结果。
         attempted 用于记录哪些 symbol 尝试过但未匹配。
         """
-        now = datetime.now(timezone.utc).isoformat()
-        symbols = self.cache.setdefault("symbols", {})
-        by_disc = self.cache.setdefault("by_discriminator", {})
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            symbols = self.cache.setdefault("symbols", {})
+            by_disc = self.cache.setdefault("by_discriminator", {})
 
-        for sym, info in resolved.items():
-            symbols[sym] = {
-                "cmc_id": info["cmc_id"],
-                "name": info.get("name"),
-                "discriminator": info["discriminator"],
-                "chain": info.get("chain"),
-                "contract_address": info.get("contract_address"),
-                "resolved_at": now,
-                "re_validated_at": now,
-            }
-            by_disc[info["discriminator"]] = sym
+            for sym, info in resolved.items():
+                symbols[sym] = {
+                    "cmc_id": info["cmc_id"],
+                    "name": info.get("name"),
+                    "discriminator": info["discriminator"],
+                    "chain": info.get("chain"),
+                    "contract_address": info.get("contract_address"),
+                    "resolved_at": now,
+                    "re_validated_at": now,
+                }
+                by_disc[info["discriminator"]] = sym
 
-        unresolved_set = set(self.cache.get("unresolved", []))
-        matched = set(resolved.keys())
-        for sym in attempted:
-            if sym not in matched:
-                unresolved_set.add(sym)
-        self.cache["unresolved"] = sorted(unresolved_set)
+            unresolved_set = set(self.cache.get("unresolved", []))
+            matched = set(resolved.keys())
+            for sym in attempted:
+                if sym not in matched:
+                    unresolved_set.add(sym)
+            self.cache["unresolved"] = sorted(unresolved_set)
 
-        self.cache["built_at"] = now
-        self._save_cache()
+            self.cache["built_at"] = now
+            self._save_cache()
 
     # ════════════════════════════════════════════════════════════════
     #  内部方法
@@ -338,15 +346,41 @@ class CMCMarketDataClient:
         """调用 /v2/cryptocurrency/info 获取 symbol 的所有变体
 
         返回 {symbol: [{id, name, platform}, ...], ...}
+
+        部分无效 symbol 会导致 CMC 返回 400，此时自动二分降级重试。
         """
+        return self._fetch_info_batch(symbols)
+
+    def _fetch_info_batch(
+        self, symbols: list[str]
+    ) -> dict[str, list[dict]]:
+        if not symbols:
+            return {}
         result: dict[str, list[dict]] = {}
         for i in range(0, len(symbols), self.MAX_SYMBOLS_PER_REQUEST):
             batch = symbols[i: i + self.MAX_SYMBOLS_PER_REQUEST]
-            resp = self._request(
-                "GET",
-                self.INFO_PATH,
-                params={"symbol": ",".join(batch)},
-            )
+            try:
+                resp = self._request(
+                    "GET",
+                    self.INFO_PATH,
+                    params={"symbol": ",".join(batch)},
+                )
+            except requests.HTTPError as e:
+                resp_obj = getattr(e, "response", None)
+                if resp_obj is not None and resp_obj.status_code == 400:
+                    if len(batch) == 1:
+                        logger.warning(
+                            f"Symbol {batch[0]} not found on CMC"
+                        )
+                        continue
+                    mid = len(batch) // 2
+                    time.sleep(1)
+                    left = self._fetch_info_batch(batch[:mid])
+                    right = self._fetch_info_batch(batch[mid:])
+                    result.update(left)
+                    result.update(right)
+                    continue
+                raise
             data = resp.get("data", {})
             for sym, entries in data.items():
                 entries_list = (

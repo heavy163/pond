@@ -44,7 +44,7 @@ per-symbol 逐请求模式。
 | 端点 | 用途 | 请求数 | 关键返回字段 |
 |------|------|--------|-------------|
 | `/v2/cryptocurrency/info` | 查代币元数据（含链上合约地址） | 1 次 / 所有标的 | `platform.slug`（链名）, `platform.token_address`（合约地址）, `id`（CMC ID） |
-| `/v3/cryptocurrency/quotes/latest` | 查特定币的最新报价/供应量 | 1 次 / ~120 个 id | `total_supply`, `circulating_supply`, `max_supply`, `market_cap`, `quote.USD.price` |
+| `/v2/cryptocurrency/quotes/latest` | 查特定币的最新报价/供应量 | 1 次 / ~120 个 id | `total_supply`, `circulating_supply`, `max_supply`, `market_cap`, `quote.USD.price` |
 | `/v3/cryptocurrency/listings/latest` | 拉全市场按市值排序列表 | 备用 | 同上 + `platform` |
 
 ### 核心流程概览
@@ -64,12 +64,12 @@ per-symbol 逐请求模式。
   │  ③ 映射解析（仅未缓存/过期时执行，1–3 次 HTTP）       │
   │     a. CMC /v2/cryptocurrency/info                    │
   │        → 拿到每个 symbol 的所有链上变体 + 合约地址     │
-  │     b. CMC /v3/cryptocurrency/quotes/latest           │
+   │     b. CMC /v2/cryptocurrency/quotes/latest           │
   │        → 用 id 查全部变体的 market_cap                │
   │     c. 按市值降序选唯一变体 → 写入缓存                 │
   │                                                      │
   │  ④ 查供应量（2 次 HTTP，日常同步的核心）               │
-  │     CMC /v3/cryptocurrency/quotes/latest?id=...       │
+   │     CMC /v2/cryptocurrency/quotes/latest?id=...       │
   │     → 返回 total_supply, circulating_supply, ...       │
   │                                                      │
   │  ⑤ 写入 ClickHouse FutureInfo 表                      │
@@ -108,7 +108,7 @@ PEPEUSDT       ① Pepe (ETH)          ← contract_address 0x6982...
 def resolve_binance_to_cmc(
     base_asset: str,
     cmc_variants: list[dict],   # 从 /v2/cryptocurrency/info 返回的该 symbol 所有变体
-    quotes_by_id: dict[int, dict],  # 从 /v3/cryptocurrency/quotes/latest 返回的市值数据
+    quotes_by_id: dict[int, dict],  # 从 /v2/cryptocurrency/quotes/latest 返回的市值数据
 ) -> int | None:
     """对给定 symbol，从多个 CMC 变体中选出一个对应 Binance 上架的那个。
 
@@ -254,7 +254,7 @@ cache["PEPE"] = 24482    ← 弱 key。哪天市值排序变了，指向的可�
      构建 discriminator → 写入缓存
 
 ④ 全部 cmc_id 就绪后，查 supply 数据
-   /v3/cryptocurrency/quotes/latest?id=...  →  2 次 HTTP
+   /v2/cryptocurrency/quotes/latest?id=...  →  2 次 HTTP
 
 ⑤ 缓存未匹配的标的（标记为无数据），下次跳过
 ```
@@ -327,6 +327,7 @@ discriminator 比对优于 cmc_id 比对，因为：
 ```python
 import os
 import json
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -339,7 +340,7 @@ class CMCMarketDataClient:
     """封装 CMC API 调用 + 缓存"""
 
     BASE_URL = "https://pro-api.coinmarketcap.com"
-    QUOTES_PATH = "/v3/cryptocurrency/quotes/latest"
+    QUOTES_PATH = "/v2/cryptocurrency/quotes/latest"
     INFO_PATH = "/v2/cryptocurrency/info"
     LISTINGS_PATH = "/v3/cryptocurrency/listings/latest"
 
@@ -351,13 +352,15 @@ class CMCMarketDataClient:
         self.api_key = api_key or os.environ.get("CMC_PRO_API_KEY")
         if not self.api_key:
             raise ValueError("CMC_PRO_API_KEY not set")
+        self._lock = threading.RLock()
         self.session = requests.Session()
         self.session.headers.update({
             "X-CMC_PRO_API_KEY": self.api_key,
             "Accept": "application/json",
         })
         self.cache_path = Path(cache_path)
-        self.cache = self._load_cache()
+        with self._lock:
+            self.cache = self._load_cache()
 
     # ── 供应量查询（每次同步核心） ──
 
@@ -495,132 +498,132 @@ class CMCMarketDataClient:
 
     def _update_cache(self, resolved: dict[str, dict], attempted: list[str]):
         """将解析结果写入缓存，同时维护主索引和 discriminator 索引"""
-        now = datetime.now(timezone.utc).isoformat()
-        symbols = self.cache.setdefault("symbols", {})
-        by_disc = self.cache.setdefault("by_discriminator", {})
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            symbols = self.cache.setdefault("symbols", {})
+            by_disc = self.cache.setdefault("by_discriminator", {})
 
-        for sym, info in resolved.items():
-            # 主索引：baseAsset → 条目
-            symbols[sym] = {
-                "cmc_id": info["cmc_id"],
-                "name": info.get("name"),
-                "discriminator": info["discriminator"],
-                "chain": info.get("chain"),
-                "contract_address": info.get("contract_address"),
-                "resolved_at": now,
-                "re_validated_at": now,
-            }
-            # discriminator 索引：discriminator → baseAsset
-            by_disc[info["discriminator"]] = sym
+            for sym, info in resolved.items():
+                symbols[sym] = {
+                    "cmc_id": info["cmc_id"],
+                    "name": info.get("name"),
+                    "discriminator": info["discriminator"],
+                    "chain": info.get("chain"),
+                    "contract_address": info.get("contract_address"),
+                    "resolved_at": now,
+                    "re_validated_at": now,
+                }
+                by_disc[info["discriminator"]] = sym
 
-        # 记录未匹配的
-        unresolved = self.cache.setdefault("unresolved", [])
-        matched = set(resolved.keys())
-        for sym in attempted:
-            if sym not in matched and sym not in unresolved:
-                unresolved.append(sym)
+            unresolved_set = set(self.cache.get("unresolved", []))
+            matched = set(resolved.keys())
+            for sym in attempted:
+                if sym not in matched:
+                    unresolved_set.add(sym)
+            self.cache["unresolved"] = sorted(unresolved_set)
 
-        self.cache["built_at"] = now
-        self._save_cache()
+            self.cache["built_at"] = now
+            self._save_cache()
 
     def get_cached_mapping(self, base_asset: str) -> dict | None:
         """从缓存中获取映射条目（含 cmc_id + discriminator）
 
         返回 None 表示未缓存或已知不可解析。
         """
-        entry = self.cache.get("symbols", {}).get(base_asset.upper())
-        if entry:
-            return {
-                "cmc_id": entry["cmc_id"],
-                "discriminator": entry["discriminator"],
-                "chain": entry.get("chain"),
-                "contract_address": entry.get("contract_address"),
-            }
-        # 检查是否已知不可解析
-        if base_asset.upper() in self.cache.get("unresolved", []):
-            return None  # 已确认无法匹配
-        return None  # 未缓存
+        with self._lock:
+            entry = self.cache.get("symbols", {}).get(base_asset.upper())
+            if entry:
+                return {
+                    "cmc_id": entry["cmc_id"],
+                    "discriminator": entry["discriminator"],
+                    "chain": entry.get("chain"),
+                    "contract_address": entry.get("contract_address"),
+                }
+            if base_asset.upper() in self.cache.get("unresolved", []):
+                return None
+            return None
 
     def needs_re_validate(self, interval_days: int = 30) -> bool:
         """检查是否需要全量重验证"""
-        built_at = self.cache.get("built_at")
-        if not built_at:
-            return True
-        elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(built_at)
-        return elapsed > timedelta(days=interval_days)
+        with self._lock:
+            built_at = self.cache.get("built_at")
+            if not built_at:
+                return True
+            elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(built_at)
+            return elapsed > timedelta(days=interval_days)
 
     def validate_mappings(self) -> list[dict]:
         """全量重验证：对比 discriminator，检测底层项目是否更换。
 
         仅需 /v2/cryptocurrency/info（元数据），不需要查 quotes（供应量）。
         """
-        if not self.cache.get("symbols"):
-            return []
+        with self._lock:
+            if not self.cache.get("symbols"):
+                return []
 
-        # 收集所有已缓存的 baseAsset
-        all_bases = list(self.cache["symbols"].keys())
-        logger.info(f"Validating {len(all_bases)} cached mappings...")
+            all_bases = list(self.cache["symbols"].keys())
+            logger.info(f"Validating {len(all_bases)} cached mappings...")
 
-        # 重新查询 CMC 当前数据
-        current_info = self._fetch_info(all_bases)
+            # 重新查询 CMC 当前数据
+            current_info = self._fetch_info(all_bases)
 
-        changed = []
-        for base_asset, entry in self.cache["symbols"].items():
-            stored_disc = entry["discriminator"]
+            changed = []
+            for base_asset, entry in self.cache["symbols"].items():
+                stored_disc = entry["discriminator"]
 
-            # 获取 CMC 当前返回的变体
-            variants = current_info.get(base_asset)
-            if not variants:
-                continue
+                # 获取 CMC 当前返回的变体
+                variants = current_info.get(base_asset)
+                if not variants:
+                    continue
 
-            # 按市值排序取最佳变体（同 resolve_mapping 逻辑）
-            quotes = self.batch_quotes_by_id([v["id"] for v in variants])
-            best = max(
-                variants,
-                key=lambda v: (
-                    quotes.get(v["id"], {}).get("quote", {})
-                    .get("USD", {}).get("market_cap", 0) or 0
-                ),
-            )
-            current_disc = self._build_discriminator(base_asset, best.get("platform"))
+                # 按市值排序取最佳变体（同 resolve_mapping 逻辑）
+                quotes = self.batch_quotes_by_id([v["id"] for v in variants])
+                best = max(
+                    variants,
+                    key=lambda v: (
+                        quotes.get(v["id"], {}).get("quote", {})
+                        .get("USD", {}).get("market_cap", 0) or 0
+                    ),
+                )
+                current_disc = self._build_discriminator(base_asset, best.get("platform"))
 
-            if stored_disc != current_disc:
-                # discriminator 变了 = 底层项目已更换
-                changed.append({
-                    "base_asset": base_asset,
-                    "old_discriminator": stored_disc,
-                    "new_discriminator": current_disc,
-                    "old_cmc_id": entry["cmc_id"],
-                    "new_cmc_id": best["id"],
-                    "old_name": entry.get("name"),
-                    "new_name": best.get("name"),
-                })
-                # 自动更新缓存
-                platform = best.get("platform")
-                entry["cmc_id"] = best["id"]
-                entry["discriminator"] = current_disc
-                entry["chain"] = platform.get("slug") if platform else None
-                entry["contract_address"] = platform.get("token_address") if platform else None
-                entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
-                # 更新 discriminator 索引
-                by_disc = self.cache.setdefault("by_discriminator", {})
-                if stored_disc in by_disc:
-                    del by_disc[stored_disc]
-                by_disc[current_disc] = base_asset
+                if stored_disc != current_disc:
+                    # discriminator 变了 = 底层项目已更换
+                    changed.append({
+                        "base_asset": base_asset,
+                        "old_discriminator": stored_disc,
+                        "new_discriminator": current_disc,
+                        "old_cmc_id": entry["cmc_id"],
+                        "new_cmc_id": best["id"],
+                        "old_name": entry.get("name"),
+                        "new_name": best.get("name"),
+                    })
+                    # 自动更新缓存
+                    platform = best.get("platform")
+                    entry["cmc_id"] = best["id"]
+                    entry["discriminator"] = current_disc
+                    entry["chain"] = platform.get("slug") if platform else None
+                    entry["contract_address"] = platform.get("token_address") if platform else None
+                    entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
+                    # 更新 discriminator 索引
+                    by_disc = self.cache.setdefault("by_discriminator", {})
+                    if stored_disc in by_disc:
+                        del by_disc[stored_disc]
+                    by_disc[current_disc] = base_asset
+                else:
+                    # 一致，只更新时间戳
+                    entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
+
+            self.cache["built_at"] = datetime.now(timezone.utc).isoformat()
+            self._save_cache()
+
+            if changed:
+                logger.warning(
+                    f"Mapping changes detected for {len(changed)} symbols: {changed}"
+                )
             else:
-                # 一致，只更新时间戳
-                entry["re_validated_at"] = datetime.now(timezone.utc).isoformat()
-
-        self.cache["built_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_cache()
-
-        if changed:
-            logger.warning(
-                f"Mapping changes detected for {len(changed)} symbols: {changed}"
-            )
-        else:
-            logger.info("All mappings validated, no changes detected")
-        return changed
+                logger.info("All mappings validated, no changes detected")
+            return changed
 ```
 
 ## 七、__sync_futures_info 改造后流程
@@ -749,14 +752,17 @@ class FuturesHelper:
                 continue
 
             info = quotes.get(mapping["cmc_id"])
-            if info and info.get("total_supply") and info.get("market_cap"):
-                price = info["quote"]["USD"]["price"]
+            if info and info.get("total_supply"):
+                price = info.get("quote", {}).get("USD", {}).get("price")
                 total_supply = info["total_supply"]
-                market_cap = info["market_cap"]
-                mcap_fdv_ratio = (
-                    market_cap / (total_supply * price)
-                    if total_supply and price else None
-                )
+                market_cap = info.get("quote", {}).get("USD", {}).get("market_cap")
+                if price and market_cap:
+                    mcap_fdv_ratio = (
+                        market_cap / (total_supply * price)
+                    )
+                else:
+                    total_supply = None
+                    mcap_fdv_ratio = None
             else:
                 total_supply = None
                 mcap_fdv_ratio = None

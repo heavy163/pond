@@ -66,10 +66,10 @@ class DirectDataProxy(DataProxy):
     _exchange_info_cache = None
     _exchange_info_cache_time = None
 
-    def __init__(self) -> None:
-        self.exchange = UMFutures(
-            proxies={"https": "127.0.0.1:7890", "http": "127.0.0.1:7890"}
-        )
+    def __init__(self, proxies: dict | None = None) -> None:
+        if proxies is None:
+            proxies = {"https": "127.0.0.1:7890", "http": "127.0.0.1:7890"}
+        self.exchange = UMFutures(proxies=proxies)
 
     def um_future_exchange_info(self) -> dict:
         # 检查缓存是否存在且未过期（24小时）
@@ -134,6 +134,9 @@ class FuturesHelper:
         self.crypto_db = crypto_db
         self.clickhouse = clickhouse
         self.configs = kwargs
+        self.proxy_host = kwargs.get("proxy_host")
+        self.proxy_port = kwargs.get("proxy_port")
+        # DirectDataProxy 使用默认代理（硬编码值），调用方可事后通过 set_data_prox 覆盖
         self.data_proxy = DirectDataProxy()
         self.fix_kline_with_cryptodb = fix_kline_with_cryptodb
         api_key = kwargs.get(
@@ -147,8 +150,6 @@ class FuturesHelper:
             "BINANCE_API_SECRET", os.environ.get("BINANCE_API_SECRET", None)
         )
         self.binance = Client(binance_api_key, binance_api_secret)
-        self.proxy_host = kwargs.get("proxy_host", None)
-        self.proxy_port = kwargs.get("proxy_port", None)
 
         # CMC 客户端（用于替代 CoinGecko 查询代币供应量）
         cmc_cache_path = kwargs.get(
@@ -767,14 +768,15 @@ class FuturesHelper:
                 continue
 
             info = quotes.get(mapping["cmc_id"])
-            if info and info.get("total_supply") and info.get("market_cap"):
-                price = info["quote"]["USD"]["price"]
+            if info and info.get("total_supply"):
+                price = info.get("quote", {}).get("USD", {}).get("price")
                 total_supply = info["total_supply"]
-                market_cap = info["market_cap"]
-                mcap_fdv_ratio = (
-                    market_cap / (total_supply * price)
-                    if total_supply and price else None
-                )
+                market_cap = info.get("quote", {}).get("USD", {}).get("market_cap")
+                if price and market_cap:
+                    mcap_fdv_ratio = market_cap / (total_supply * price)
+                else:
+                    total_supply = None
+                    mcap_fdv_ratio = None
             else:
                 total_supply = None
                 mcap_fdv_ratio = None
