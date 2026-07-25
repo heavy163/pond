@@ -365,6 +365,22 @@ class SpotHelper:
         df = df.join(existence_df, on=["close_time", "jj_code"], how="left")
         return df
 
+    def attach_spot_kline_count(self, df: pl.DataFrame, extra_query_days=30):
+        start = df["close_time"].min()
+        end = df["close_time"].max()
+        sql = """
+            SELECT code, COUNT(*) AS spot_kline_count, MIN(datetime) AS spot_first_time
+            FROM kline_spot_1h
+            WHERE datetime >= %(start)s AND datetime <= %(end)s
+            GROUP BY code
+        """
+        count_df = self.clickhouse.native_sql_read_table(
+            sql, {"start": start - timedelta(days=extra_query_days), "end": end}
+        )
+        count_df = pl.from_pandas(count_df).rename({"code": "jj_code"})
+        df = df.join(count_df, on="jj_code", how="left")
+        return df
+
 
 if __name__ == "__main__":
     import os
