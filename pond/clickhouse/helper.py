@@ -1100,6 +1100,22 @@ class FuturesHelper:
             self.binance_wss[interval] = None
             logger.debug(f"futures helper unsubscribe_futures {interval}")
 
+    def attach_future_kline(self, df: pl.DataFrame, extra_days=0):
+        data_start = df["close_time"].min() - timedelta(days=extra_days)
+        data_end = df["close_time"].max()
+        time_unit = df["close_time"].dtype.time_unit
+        df_klines = self.clickhouse.native_read_table(
+            FuturesKline1H, data_start, data_end
+        )
+        df_klines = pl.from_pandas(df_klines)
+        df_klines = df_klines.with_columns(
+            datetime=(pl.col("datetime") + pl.duration(seconds=1))
+            .dt.round(every="1m")
+            .dt.cast_time_unit(time_unit),
+        ).rename(mapping={"code": "jj_code", "datetime": "close_time"})
+        df = df_klines.join(df, on=["jj_code", "close_time"], how="left")
+        return df
+
     def attach_future_info(self, df: pl.DataFrame, back_fill=True):
         start = df["close_time"].min()
         end = df["close_time"].max()
@@ -1383,38 +1399,46 @@ class FuturesHelper:
                 if detail_entry.next_unlock.date > cutoff:
                     continue
             except Exception:
-                logger.warning(f"token_unlock: fallback detail failed for {base_asset} (#{cmc_id})")
+                logger.warning(
+                    f"token_unlock: fallback detail failed for {base_asset} (#{cmc_id})"
+                )
                 continue
             platform, contract_addr = self._resolve_platform(base_asset)
-            fallback_rows.append({
-                "symbol": detail_entry.symbol,
-                "platform": platform,
-                "contract_address": contract_addr,
-                "next_unlock_time": detail_entry.next_unlock.date,
-                "slug": detail_entry.slug,
-                "crypto_id": detail_entry.crypto_id,
-                "name": detail_entry.name,
-                "total_unlocked_pct": detail_entry.total_unlocked_pct,
-                "next_unlock_amount": detail_entry.next_unlock.token_amount,
-                "next_unlock_amount_usd": detail_entry.next_unlock.token_amount_usd,
-                "next_unlock_pct": detail_entry.next_unlock.token_amount_pct,
-                "circulating_supply": detail_entry.circulating_supply,
-                "price": detail_entry.price or 0.0,
-                "market_cap": detail_entry.market_cap or 0.0,
-                "binance_code": f"{bn_base}USDT",
-                "synced_at": signal,
-            })
+            fallback_rows.append(
+                {
+                    "symbol": detail_entry.symbol,
+                    "platform": platform,
+                    "contract_address": contract_addr,
+                    "next_unlock_time": detail_entry.next_unlock.date,
+                    "slug": detail_entry.slug,
+                    "crypto_id": detail_entry.crypto_id,
+                    "name": detail_entry.name,
+                    "total_unlocked_pct": detail_entry.total_unlocked_pct,
+                    "next_unlock_amount": detail_entry.next_unlock.token_amount,
+                    "next_unlock_amount_usd": detail_entry.next_unlock.token_amount_usd,
+                    "next_unlock_pct": detail_entry.next_unlock.token_amount_pct,
+                    "circulating_supply": detail_entry.circulating_supply,
+                    "price": detail_entry.price or 0.0,
+                    "market_cap": detail_entry.market_cap or 0.0,
+                    "binance_code": f"{bn_base}USDT",
+                    "synced_at": signal,
+                }
+            )
             detail_found += 1
             if len(fallback_rows) >= BATCH_SIZE:
                 df = pd.DataFrame(fallback_rows)
                 self.clickhouse.save_dataframe("token_unlock", df)
-                logger.info(f"token_unlock: saved {len(fallback_rows)} fallback rows (batch)")
+                logger.info(
+                    f"token_unlock: saved {len(fallback_rows)} fallback rows (batch)"
+                )
                 fallback_rows = []
 
         if fallback_rows:
             df = pd.DataFrame(fallback_rows)
             self.clickhouse.save_dataframe("token_unlock", df)
-            logger.info(f"token_unlock: saved {len(fallback_rows)} fallback rows (final)")
+            logger.info(
+                f"token_unlock: saved {len(fallback_rows)} fallback rows (final)"
+            )
 
         if detail_checked:
             logger.info(
@@ -1483,6 +1507,7 @@ class FuturesHelper:
 
         # DEX Screener 直连无需代理，使用独立 UMFutures 客户端获取合约列表
         from binance.um_futures import UMFutures
+
         _um = UMFutures()
         try:
             _info = _um.exchange_info()
@@ -1491,7 +1516,8 @@ class FuturesHelper:
             res_dict[tid] = True
             return
         _symbols = [
-            s for s in _info.get("symbols", [])
+            s
+            for s in _info.get("symbols", [])
             if s["contractType"] == "PERPETUAL"
             and s["pair"].endswith("USDT")
             and s["status"] == "TRADING"
@@ -1506,14 +1532,16 @@ class FuturesHelper:
         logger.info(f"token_liquidity: {len(base_assets)} base assets")
 
         session = requests.Session()
-        session.headers.update({
-            "Accept": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        })
+        session.headers.update(
+            {
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            }
+        )
         SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 
         rows = []
@@ -1531,46 +1559,72 @@ class FuturesHelper:
                 continue
 
             pairs.sort(
-                key=lambda p: float(
-                    (p.get("liquidity") or {}).get("usd", 0) or 0
-                ),
+                key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
                 reverse=True,
             )
             for pair in pairs[:5]:
-                rows.append({
-                    "symbol": base.upper(),
-                    "chain": pair.get("chainId", ""),
-                    "dex_id": pair.get("dexId", ""),
-                    "pair_address": pair.get("pairAddress", ""),
-                    "base_token": pair.get("baseToken", {}).get("address", ""),
-                    "base_token_name": pair.get("baseToken", {}).get("name", ""),
-                    "quote_token": pair.get("quoteToken", {}).get("address", ""),
-                    "quote_token_name": pair.get("quoteToken", {}).get("name", ""),
-                    "pair_created_at": (
-                        datetime.fromtimestamp(
-                            pair["pairCreatedAt"] / 1000, tz=dtm.timezone.utc
-                        )
-                        if pair.get("pairCreatedAt")
-                        else None
-                    ),
-                    "liquidity_usd": float((pair.get("liquidity") or {}).get("usd", 0) or 0),
-                    "liquidity_base": float((pair.get("liquidity") or {}).get("base", 0) or 0),
-                    "liquidity_quote": float((pair.get("liquidity") or {}).get("quote", 0) or 0),
-                    "volume_h24": float((pair.get("volume") or {}).get("h24", 0) or 0),
-                    "volume_h6": float((pair.get("volume") or {}).get("h6", 0) or 0),
-                    "volume_h1": float((pair.get("volume") or {}).get("h1", 0) or 0),
-                    "txns_buys_h24": int(((pair.get("txns") or {}).get("h24") or {}).get("buys", 0) or 0),
-                    "txns_sells_h24": int(((pair.get("txns") or {}).get("h24") or {}).get("sells", 0) or 0),
-                    "price_usd": float(pair.get("priceUsd", 0) or 0),
-                    "price_native": float(pair.get("priceNative", 0) or 0),
-                    "fdv": float(pair.get("fdv", 0) or 0),
-                    "market_cap": float(pair.get("marketCap", 0) or 0),
-                    "price_change_h24": float((pair.get("priceChange") or {}).get("h24", 0) or 0),
-                    "price_change_h6": float((pair.get("priceChange") or {}).get("h6", 0) or 0),
-                    "price_change_h1": float((pair.get("priceChange") or {}).get("h1", 0) or 0),
-                    "price_change_m5": float((pair.get("priceChange") or {}).get("m5", 0) or 0),
-                    "synced_at": signal,
-                })
+                rows.append(
+                    {
+                        "symbol": base.upper(),
+                        "chain": pair.get("chainId", ""),
+                        "dex_id": pair.get("dexId", ""),
+                        "pair_address": pair.get("pairAddress", ""),
+                        "base_token": pair.get("baseToken", {}).get("address", ""),
+                        "base_token_name": pair.get("baseToken", {}).get("name", ""),
+                        "quote_token": pair.get("quoteToken", {}).get("address", ""),
+                        "quote_token_name": pair.get("quoteToken", {}).get("name", ""),
+                        "pair_created_at": (
+                            datetime.fromtimestamp(
+                                pair["pairCreatedAt"] / 1000, tz=dtm.timezone.utc
+                            )
+                            if pair.get("pairCreatedAt")
+                            else None
+                        ),
+                        "liquidity_usd": float(
+                            (pair.get("liquidity") or {}).get("usd", 0) or 0
+                        ),
+                        "liquidity_base": float(
+                            (pair.get("liquidity") or {}).get("base", 0) or 0
+                        ),
+                        "liquidity_quote": float(
+                            (pair.get("liquidity") or {}).get("quote", 0) or 0
+                        ),
+                        "volume_h24": float(
+                            (pair.get("volume") or {}).get("h24", 0) or 0
+                        ),
+                        "volume_h6": float(
+                            (pair.get("volume") or {}).get("h6", 0) or 0
+                        ),
+                        "volume_h1": float(
+                            (pair.get("volume") or {}).get("h1", 0) or 0
+                        ),
+                        "txns_buys_h24": int(
+                            ((pair.get("txns") or {}).get("h24") or {}).get("buys", 0)
+                            or 0
+                        ),
+                        "txns_sells_h24": int(
+                            ((pair.get("txns") or {}).get("h24") or {}).get("sells", 0)
+                            or 0
+                        ),
+                        "price_usd": float(pair.get("priceUsd", 0) or 0),
+                        "price_native": float(pair.get("priceNative", 0) or 0),
+                        "fdv": float(pair.get("fdv", 0) or 0),
+                        "market_cap": float(pair.get("marketCap", 0) or 0),
+                        "price_change_h24": float(
+                            (pair.get("priceChange") or {}).get("h24", 0) or 0
+                        ),
+                        "price_change_h6": float(
+                            (pair.get("priceChange") or {}).get("h6", 0) or 0
+                        ),
+                        "price_change_h1": float(
+                            (pair.get("priceChange") or {}).get("h1", 0) or 0
+                        ),
+                        "price_change_m5": float(
+                            (pair.get("priceChange") or {}).get("m5", 0) or 0
+                        ),
+                        "synced_at": signal,
+                    }
+                )
 
             if i > 0 and i % 55 == 0:
                 logger.info(
