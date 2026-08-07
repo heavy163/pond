@@ -1182,22 +1182,24 @@ class FuturesHelper:
 
         if what == "open_interest":
             local_df = local_df.select(
-                pl.col("create_time").alias("close_time"),
-                pl.col("sum_open_interest"),
-                pl.col("sum_open_interest_value"),
-            ).with_columns(code=pl.lit(code))
+                pl.col("create_time").alias("datetime"),
+                pl.col("sum_open_interest").alias("sumOpenInterest"),
+                pl.col("sum_open_interest_value").alias("sumOpenInterestValue"),
+            ).with_columns(
+                code=pl.lit(code),
+                CMCCirculatingSupply=pl.lit(None, dtype=pl.Float64),
+            )
         elif what in ("long_short_ratio", "long_short_position_ratio"):
-            local_df = local_df.select(
-                pl.col("create_time").alias("close_time"),
-                pl.col("longAccount"),
-                pl.col("shortAccount"),
-                pl.col("longShortRatio"),
-            ).with_columns(code=pl.lit(code))
+            logger.warning(
+                f"backfill {what} {code}: metrics CSV lacks longAccount/shortAccount "
+                f"columns; LSR history must come from REST API (30d limit)"
+            )
+            return "skip", 0
         else:
             return "failed", 0
 
         try:
-            self.clickhouse.save_to_db(table, local_df.to_pandas(), None)
+            self.clickhouse.save_dataframe(table.__tablename__, local_df.to_pandas(), trunk_size=50000)
         except Exception as e:
             logger.error(f"backfill {what} {code}: clickhouse save failed: {e}")
             return "failed", 0
