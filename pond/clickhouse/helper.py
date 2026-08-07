@@ -1077,16 +1077,17 @@ class FuturesHelper:
         start: datetime,
         end: datetime = None,
         workers: int = 1,
-        interval: str = "5m",
     ):
-        """使用 CryptoDB 从 Binance Vision 全量回填历史数据到 ClickHouse。
+        """使用 CryptoDB 从 Binance Vision 全量回填历史 OI/LSR 数据到 ClickHouse。
+
+        Binance Vision 无独立 OI/LSR 端点，数据存储在 metrics 端点（日度 ZIP，内含 5m 粒度 CSV）。
+        本方法下载 metrics → 提取 OI 或 LSR 列 → 映射到对应 ClickHouse 表。
 
         Args:
             what: "open_interest" | "long_short_ratio" | "long_short_position_ratio"
             start: 起始时间
             end: 结束时间 (None = now)
             workers: 并行 worker 数
-            interval: 数据粒度 ("5m" | "1h")
         """
         from pond.binance_history.type import DataType
 
@@ -1095,15 +1096,9 @@ class FuturesHelper:
             "long_short_ratio": FutureLongShortRatio,
             "long_short_position_ratio": FutureLongShortPositionRatio,
         }
-        what_dtype_map = {
-            "open_interest": DataType.openInterest,
-            "long_short_ratio": DataType.topLongShortAccountRatio,
-            "long_short_position_ratio": DataType.topLongShortPositionRatio,
-        }
 
         table = what_table_map.get(what)
-        dtype = what_dtype_map.get(what)
-        if table is None or dtype is None:
+        if table is None:
             raise ValueError(f"unsupported backfill what={what}")
 
         if end is None:
@@ -1131,7 +1126,7 @@ class FuturesHelper:
                 onboard = datetime.fromtimestamp(s["onboardDate"] / 1000)
                 future = executor.submit(
                     self.__backfill_single,
-                    code, onboard, start, end, table, dtype, what, interval,
+                    code, onboard, start, end, table, what,
                 )
                 future_map[future] = code
 
@@ -1164,10 +1159,10 @@ class FuturesHelper:
         start: datetime,
         end: datetime,
         table,
-        dtype,
         what: str,
-        interval: str = "5m",
     ):
+        from pond.binance_history.type import DataType
+
         _start = max(start, onboard_date)
         if _start >= end:
             return "skip", 0
@@ -1175,7 +1170,7 @@ class FuturesHelper:
         try:
             local_df = self.crypto_db.load_history_data(
                 code, _start, end,
-                data_type=dtype, timeframe=interval,
+                data_type=DataType.metrics, timeframe="1d",
             )
         except Exception as e:
             logger.warning(f"backfill {what} {code}: crypto_db failed: {e}")
@@ -1185,10 +1180,21 @@ class FuturesHelper:
             logger.warning(f"backfill {what} {code}: no data")
             return "skip", 0
 
-        local_df = local_df.with_columns(
-            close_time=pl.col("timestamp"),
-            code=pl.lit(code),
-        ).drop("timestamp")
+        if what == "open_interest":
+            local_df = local_df.select(
+                pl.col("create_time").alias("close_time"),
+                pl.col("sum_open_interest"),
+                pl.col("sum_open_interest_value"),
+            ).with_columns(code=pl.lit(code))
+        elif what in ("long_short_ratio", "long_short_position_ratio"):
+            local_df = local_df.select(
+                pl.col("create_time").alias("close_time"),
+                pl.col("longAccount"),
+                pl.col("shortAccount"),
+                pl.col("longShortRatio"),
+            ).with_columns(code=pl.lit(code))
+        else:
+            return "failed", 0
 
         try:
             self.clickhouse.save_to_db(table, local_df.to_pandas(), None)

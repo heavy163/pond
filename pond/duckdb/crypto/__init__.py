@@ -131,9 +131,6 @@ class CryptoDB(DuckDB):
             klines_schema,
             metrics_schema,
             fundingRate_schema,
-            openInterest_schema,
-            topLongShortAccountRatio_schema,
-            topLongShortPositionRatio_schema,
         )
 
         return {
@@ -168,9 +165,6 @@ class CryptoDB(DuckDB):
                 "is_buyer_maker": pl.Boolean,
             },
             DataType.fundingRate: fundingRate_schema,
-            DataType.openInterest: openInterest_schema,
-            DataType.topLongShortAccountRatio: topLongShortAccountRatio_schema,
-            DataType.topLongShortPositionRatio: topLongShortPositionRatio_schema,
         }[data_type]
 
     @staticmethod
@@ -346,9 +340,6 @@ class CryptoDB(DuckDB):
                             DataType.klines: "close_time",
                             DataType.metrics: "create_time",
                             DataType.fundingRate: "calc_time",
-                            DataType.openInterest: "timestamp",
-                            DataType.topLongShortAccountRatio: "timestamp",
-                            DataType.topLongShortPositionRatio: "timestamp",
                         }.get(data_type, "close_time")
 
                         max_time = existing_df[time_column].max()
@@ -479,13 +470,6 @@ class CryptoDB(DuckDB):
                 df = self.transform_metrics(df)
             elif data_type == DataType.fundingRate:
                 df = self.transform_fundingRate(df, symbol)
-            elif data_type == DataType.openInterest:
-                df = self.transform_open_interest(df, symbol)
-            elif data_type in (
-                DataType.topLongShortAccountRatio,
-                DataType.topLongShortPositionRatio,
-            ):
-                df = self.transform_long_short_ratio(df, symbol)
         else:
             df = (
                 pl.DataFrame({}, schema=csv_schema)
@@ -507,18 +491,6 @@ class CryptoDB(DuckDB):
             .str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S")
             .dt.truncate("5m")
         ).rename({"symbol": "jj_code"})
-
-    def transform_open_interest(self, df: pl.DataFrame, symbol: str):
-        return df.with_columns(
-            (pl.col("timestamp") * 1e3).cast(pl.Datetime).dt.truncate("5m"),
-            jj_code=pl.lit(symbol),
-        )
-
-    def transform_long_short_ratio(self, df: pl.DataFrame, symbol: str):
-        return df.with_columns(
-            (pl.col("timestamp") * 1e3).cast(pl.Datetime).dt.truncate("5m"),
-            jj_code=pl.lit(symbol),
-        )
 
     def transform_klines(
         self,
