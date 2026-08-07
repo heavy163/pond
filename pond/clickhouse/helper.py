@@ -1172,6 +1172,23 @@ class FuturesHelper:
         if _start >= end:
             return "skip", 0
 
+        # 查询 ClickHouse 已有数据的最早时间，只回填更早的数据，避免覆盖
+        try:
+            r = self.clickhouse.native_sql_read_table(
+                f"SELECT min(datetime) as t FROM {table.__tablename__} WHERE code = %(code)s",
+                {"code": code},
+            )
+            if r is not None and len(r) > 0:
+                val = r.iloc[0, 0]
+                if val is not None and str(val) != "nan":
+                    t = pd.to_datetime(val).to_pydatetime()
+                    end = min(end, t)
+        except Exception:
+            pass
+
+        if _start >= end:
+            return "skip", 0
+
         try:
             local_df = self.crypto_db.load_history_data(
                 code, _start, end,
