@@ -1183,8 +1183,10 @@ class FuturesHelper:
                 if val is not None and str(val) != "nan":
                     t = pd.to_datetime(val).to_pydatetime()
                     # metrics 日度 ZIP 含全天数据，需对齐到天边界前 1 小时
-                    end = min(end, t.replace(hour=0, minute=0, second=0, microsecond=0)
-                              - timedelta(hours=1))
+                    # 跳过 epoch 1970（空表返回）
+                    if t.year > 1970:
+                        end = min(end, t.replace(hour=0, minute=0, second=0, microsecond=0)
+                                  - timedelta(hours=1))
         except Exception:
             pass
 
