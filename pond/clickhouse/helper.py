@@ -1080,8 +1080,13 @@ class FuturesHelper:
     ):
         """使用 CryptoDB 从 Binance Vision 全量回填历史 OI/LSR 数据到 ClickHouse。
 
-        Binance Vision 无独立 OI/LSR 端点，数据存储在 metrics 端点（日度 ZIP，内含 5m 粒度 CSV）。
-        本方法下载 metrics → 提取 OI 或 LSR 列 → 映射到对应 ClickHouse 表。
+        注意: backfill(metrics CSV) 与 sync(REST API) 写入同一 ClickHouse 表时，
+        同一 (datetime, code) 的值存在采样时间偏移差异:
+          OI:  max ~1.2%, mean ~0.3%
+          LSR: max ~5.5%, mean ~1.4%
+        两者均为 Binance 官方数据源，差异由快照时刻不同导致（REST 整点采样 vs
+        metrics 5min 区间内采样），非数据错误。因子 rolling 平均/zscore 归一化
+        会消除此量级偏差。验证脚本: scripts/verify_oi_lsr_consistency.py
 
         Args:
             what: "open_interest" | "long_short_ratio" | "long_short_position_ratio"
