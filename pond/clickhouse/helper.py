@@ -1190,11 +1190,19 @@ class FuturesHelper:
                 CMCCirculatingSupply=pl.lit(None, dtype=pl.Float64),
             )
         elif what in ("long_short_ratio", "long_short_position_ratio"):
-            logger.warning(
-                f"backfill {what} {code}: metrics CSV lacks longAccount/shortAccount "
-                f"columns; LSR history must come from REST API (30d limit)"
+            ratio_col = (
+                "count_toptrader_long_short_ratio"
+                if what == "long_short_ratio"
+                else "sum_toptrader_long_short_ratio"
             )
-            return "skip", 0
+            local_df = local_df.select(
+                pl.col("create_time").alias("datetime"),
+                pl.col(ratio_col).alias("longShortRatio"),
+            ).with_columns(
+                code=pl.lit(code),
+                longAccount=pl.lit(None, dtype=pl.Float64),
+                shortAccount=pl.lit(None, dtype=pl.Float64),
+            )
         else:
             return "failed", 0
 
