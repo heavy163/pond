@@ -1206,6 +1206,17 @@ class FuturesHelper:
         else:
             return "failed", 0
 
+        # 5m 粒度 → 取每小时最后一条（OI/LSR 均为慢变量，小时级聚合不丢信号）
+        local_df = (
+            local_df
+            .with_columns(hour=pl.col("datetime").dt.truncate("1h"))
+            .sort("datetime")
+            .group_by(["hour", "code"], maintain_order=True)
+            .agg(pl.all().last())
+            .drop("datetime")
+            .rename({"hour": "datetime"})
+        )
+
         try:
             self.clickhouse.save_dataframe(table.__tablename__, local_df.to_pandas(), trunk_size=50000)
         except Exception as e:
