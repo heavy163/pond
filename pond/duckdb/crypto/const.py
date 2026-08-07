@@ -38,9 +38,29 @@ fundingRate_schema = {
     "last_funding_rate": pl.Float64,
 }
 
+openInterest_schema = {
+    "timestamp": pl.Int64,
+    "sum_open_interest": pl.Float64,
+    "sum_open_interest_value": pl.Float64,
+}
+
+topLongShortAccountRatio_schema = {
+    "timestamp": pl.Int64,
+    "long_account": pl.Float64,
+    "short_account": pl.Float64,
+    "long_short_ratio": pl.Float64,
+}
+
+topLongShortPositionRatio_schema = {
+    "timestamp": pl.Int64,
+    "long_position": pl.Float64,
+    "short_position": pl.Float64,
+    "long_short_position_ratio": pl.Float64,
+}
+
 timeframe_data_types_dict = {
     "1m": [DataType.klines],
-    "5m": [DataType.klines],
+    "5m": [DataType.klines, DataType.openInterest, DataType.topLongShortAccountRatio, DataType.topLongShortPositionRatio],
     "15m": [DataType.klines],
     "30m": [DataType.klines],
     "1h": [DataType.klines],

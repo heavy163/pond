@@ -39,6 +39,18 @@ class CryptoPath:
         self.fundingRate_um = self.fundingRate / "um"
         self.fundingRate_cm = self.fundingRate / "cm"
 
+        # openInterest data path
+        self.openInterest = self.crypto / "open_interest"
+        self.openInterest_um = self.openInterest / "um"
+
+        # longShortAccountRatio data path
+        self.longShortAccountRatio = self.crypto / "long_short_account_ratio"
+        self.longShortAccountRatio_um = self.longShortAccountRatio / "um"
+
+        # longShortPositionRatio data path
+        self.longShortPositionRatio = self.crypto / "long_short_position_ratio"
+        self.longShortPositionRatio_um = self.longShortPositionRatio / "um"
+
         #  orderbook data path
         self.orderbook = self.crypto / "orderbook"
 
@@ -78,6 +90,18 @@ class CryptoPath:
             self.fundingRate_cm / "8h",
             self.fundingRate_um,
             self.fundingRate_um / "8h",
+            # openInterest path
+            self.openInterest,
+            self.openInterest_um,
+            self.openInterest_um / "5m",
+            # longShortAccountRatio path
+            self.longShortAccountRatio,
+            self.longShortAccountRatio_um,
+            self.longShortAccountRatio_um / "5m",
+            # longShortPositionRatio path
+            self.longShortPositionRatio,
+            self.longShortPositionRatio_um,
+            self.longShortPositionRatio_um / "5m",
             # orderbook path
             self.orderbook,
         ]
@@ -115,4 +139,19 @@ class CryptoPath:
                 AssetType.future_cm,
                 DataType.fundingRate,
             ): self.fundingRate_cm,
+            # openInterest path map
+            (
+                AssetType.future_um,
+                DataType.openInterest,
+            ): self.openInterest_um,
+            # longShortAccountRatio path map
+            (
+                AssetType.future_um,
+                DataType.topLongShortAccountRatio,
+            ): self.longShortAccountRatio_um,
+            # longShortPositionRatio path map
+            (
+                AssetType.future_um,
+                DataType.topLongShortPositionRatio,
+            ): self.longShortPositionRatio_um,
         }[(asset_type, data_type)]  # type: ignore

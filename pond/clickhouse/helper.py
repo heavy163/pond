@@ -1071,6 +1071,132 @@ class FuturesHelper:
         )
         res_dict[tid] = failure_count <= allow_missing_count
 
+    def backfill(
+        self,
+        what: str,
+        start: datetime,
+        end: datetime = None,
+        workers: int = 1,
+    ):
+        """使用 CryptoDB 从 Binance Vision 全量回填历史数据到 ClickHouse。
+
+        Args:
+            what: "open_interest" | "long_short_ratio" | "long_short_position_ratio"
+            start: 起始时间
+            end: 结束时间 (None = now)
+            workers: 并行 worker 数
+        """
+        from pond.binance_history.type import DataType
+
+        what_table_map = {
+            "open_interest": FutureOpenInterest,
+            "long_short_ratio": FutureLongShortRatio,
+            "long_short_position_ratio": FutureLongShortPositionRatio,
+        }
+        what_dtype_map = {
+            "open_interest": DataType.openInterest,
+            "long_short_ratio": DataType.topLongShortAccountRatio,
+            "long_short_position_ratio": DataType.topLongShortPositionRatio,
+        }
+
+        table = what_table_map.get(what)
+        dtype = what_dtype_map.get(what)
+        if table is None or dtype is None:
+            raise ValueError(f"unsupported backfill what={what}")
+
+        if end is None:
+            end = datetime.now(tz=dtm.timezone.utc).replace(tzinfo=None)
+
+        if self.crypto_db is None:
+            raise RuntimeError("crypto_db is not initialized")
+
+        symbols = self.get_perpetual_symbols(end)
+        if symbols is None:
+            logger.error(f"backfill {what}: failed to get symbols")
+            return
+
+        total = len(symbols)
+        synced, skipped, failed = 0, 0, 0
+        logger.info(f"backfill {what}: {total} symbols, {start} -> {end}, workers={workers}")
+
+        inner_workers = min(total, workers)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=inner_workers
+        ) as executor:
+            future_map = {}
+            for s in symbols:
+                code = s["pair"]
+                onboard = datetime.fromtimestamp(s["onboardDate"] / 1000)
+                future = executor.submit(
+                    self.__backfill_single,
+                    code, onboard, start, end, table, dtype, what,
+                )
+                future_map[future] = code
+
+            for future in concurrent.futures.as_completed(future_map):
+                code = future_map[future]
+                try:
+                    status, rows = future.result()
+                    if status == "synced":
+                        synced += 1
+                    elif status == "skip":
+                        skipped += 1
+                    elif status == "failed":
+                        failed += 1
+                    if rows > 0:
+                        logger.info(
+                            f"backfill {what} {code}: {rows} rows saved"
+                        )
+                except Exception as e:
+                    logger.error(f"backfill {what} {code}: {e}")
+                    failed += 1
+
+        logger.info(
+            f"backfill {what} completed: {synced} synced, {skipped} skipped, {failed} failed"
+        )
+
+    def __backfill_single(
+        self,
+        code: str,
+        onboard_date: datetime,
+        start: datetime,
+        end: datetime,
+        table,
+        dtype,
+        what: str,
+    ):
+        _start = max(start, onboard_date)
+        if _start >= end:
+            return "skip", 0
+
+        interval = "5m"
+
+        try:
+            local_df = self.crypto_db.load_history_data(
+                code, _start, end,
+                data_type=dtype, timeframe=interval,
+            )
+        except Exception as e:
+            logger.warning(f"backfill {what} {code}: crypto_db failed: {e}")
+            return "failed", 0
+
+        if local_df is None or len(local_df) == 0:
+            logger.warning(f"backfill {what} {code}: no data")
+            return "skip", 0
+
+        local_df = local_df.with_columns(
+            close_time=pl.col("timestamp"),
+            code=pl.lit(code),
+        ).drop("timestamp")
+
+        try:
+            self.clickhouse.save_to_db(table, local_df.to_pandas(), None)
+        except Exception as e:
+            logger.error(f"backfill {what} {code}: clickhouse save failed: {e}")
+            return "failed", 0
+
+        return "synced", len(local_df)
+
     def subscribe_futures(
         self,
         interval,
