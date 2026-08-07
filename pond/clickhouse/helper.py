@@ -1077,6 +1077,7 @@ class FuturesHelper:
         start: datetime,
         end: datetime = None,
         workers: int = 1,
+        interval: str = "5m",
     ):
         """使用 CryptoDB 从 Binance Vision 全量回填历史数据到 ClickHouse。
 
@@ -1085,6 +1086,7 @@ class FuturesHelper:
             start: 起始时间
             end: 结束时间 (None = now)
             workers: 并行 worker 数
+            interval: 数据粒度 ("5m" | "1h")
         """
         from pond.binance_history.type import DataType
 
@@ -1129,7 +1131,7 @@ class FuturesHelper:
                 onboard = datetime.fromtimestamp(s["onboardDate"] / 1000)
                 future = executor.submit(
                     self.__backfill_single,
-                    code, onboard, start, end, table, dtype, what,
+                    code, onboard, start, end, table, dtype, what, interval,
                 )
                 future_map[future] = code
 
@@ -1164,12 +1166,11 @@ class FuturesHelper:
         table,
         dtype,
         what: str,
+        interval: str = "5m",
     ):
         _start = max(start, onboard_date)
         if _start >= end:
             return "skip", 0
-
-        interval = "5m"
 
         try:
             local_df = self.crypto_db.load_history_data(

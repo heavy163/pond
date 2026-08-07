@@ -63,7 +63,7 @@ timeframe_data_types_dict = {
     "5m": [DataType.klines, DataType.openInterest, DataType.topLongShortAccountRatio, DataType.topLongShortPositionRatio],
     "15m": [DataType.klines],
     "30m": [DataType.klines],
-    "1h": [DataType.klines],
+    "1h": [DataType.klines, DataType.openInterest, DataType.topLongShortAccountRatio, DataType.topLongShortPositionRatio],
     "1d": [DataType.klines, DataType.trades, DataType.aggTrades, DataType.metrics],
     "1M": [DataType.klines, DataType.trades, DataType.aggTrades, DataType.fundingRate],
 }
