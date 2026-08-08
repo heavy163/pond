@@ -1094,7 +1094,6 @@ class FuturesHelper:
             end: 结束时间 (None = now)
             workers: 并行 worker 数
         """
-        from pond.binance_history.type import DataType
 
         what_table_map = {
             "open_interest": FutureOpenInterest,
@@ -1119,7 +1118,9 @@ class FuturesHelper:
 
         total = len(symbols)
         synced, skipped, failed = 0, 0, 0
-        logger.info(f"backfill {what}: {total} symbols, {start} -> {end}, workers={workers}")
+        logger.info(
+            f"backfill {what}: {total} symbols, {start} -> {end}, workers={workers}"
+        )
 
         inner_workers = min(total, workers)
         with concurrent.futures.ThreadPoolExecutor(
@@ -1131,7 +1132,12 @@ class FuturesHelper:
                 onboard = datetime.fromtimestamp(s["onboardDate"] / 1000)
                 future = executor.submit(
                     self.__backfill_single,
-                    code, onboard, start, end, table, what,
+                    code,
+                    onboard,
+                    start,
+                    end,
+                    table,
+                    what,
                 )
                 future_map[future] = code
 
@@ -1146,9 +1152,7 @@ class FuturesHelper:
                     elif status == "failed":
                         failed += 1
                     if rows > 0:
-                        logger.info(
-                            f"backfill {what} {code}: {rows} rows saved"
-                        )
+                        logger.info(f"backfill {what} {code}: {rows} rows saved")
                 except Exception as e:
                     logger.error(f"backfill {what} {code}: {e}")
                     failed += 1
@@ -1172,31 +1176,13 @@ class FuturesHelper:
         if _start >= end:
             return "skip", 0
 
-        # 查询 ClickHouse 已有数据的最早时间，只回填更早的数据，避免覆盖
-        try:
-            r = self.clickhouse.native_sql_read_table(
-                f"SELECT min(datetime) as t FROM {table.__tablename__} WHERE code = %(code)s",
-                {"code": code},
-            )
-            if r is not None and len(r) > 0:
-                val = r.iloc[0, 0]
-                if val is not None and str(val) != "nan":
-                    t = pd.to_datetime(val).to_pydatetime()
-                    # metrics 日度 ZIP 含全天数据，需对齐到天边界前 1 小时
-                    # 跳过 epoch 1970（空表返回）
-                    if t.year > 1970:
-                        end = min(end, t.replace(hour=0, minute=0, second=0, microsecond=0)
-                                  - timedelta(hours=1))
-        except Exception:
-            pass
-
-        if _start >= end:
-            return "skip", 0
-
         try:
             local_df = self.crypto_db.load_history_data(
-                code, _start, end,
-                data_type=DataType.metrics, timeframe="1d",
+                code,
+                _start,
+                end,
+                data_type=DataType.metrics,
+                timeframe="1d",
             )
         except Exception as e:
             logger.warning(f"backfill {what} {code}: crypto_db failed: {e}")
@@ -1234,8 +1220,7 @@ class FuturesHelper:
 
         # 5m 粒度 → 取每小时最后一条（OI/LSR 均为慢变量，小时级聚合不丢信号）
         local_df = (
-            local_df
-            .with_columns(hour=pl.col("datetime").dt.truncate("1h"))
+            local_df.with_columns(hour=pl.col("datetime").dt.truncate("1h"))
             .sort("datetime")
             .group_by(["hour", "code"], maintain_order=True)
             .agg(pl.all().last())
@@ -1244,7 +1229,9 @@ class FuturesHelper:
         )
 
         try:
-            self.clickhouse.save_dataframe(table.__tablename__, local_df.to_pandas(), trunk_size=50000)
+            self.clickhouse.save_dataframe(
+                table.__tablename__, local_df.to_pandas(), trunk_size=50000
+            )
         except Exception as e:
             logger.error(f"backfill {what} {code}: clickhouse save failed: {e}")
             return "failed", 0
