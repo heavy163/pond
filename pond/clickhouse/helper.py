@@ -1283,6 +1283,79 @@ class FuturesHelper:
         df = df_klines.join(df, on=["jj_code", "close_time"], how="left")
         return df
 
+    def attach_historical_max_close(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        为每根K线附加「截至该 close_time 的历史最高收盘价」historical_max_close。
+        严格预防未来函数：
+        - 分组A（历史最高点出现在 df 起点之前）：整段历史最高恒定，直接映射，零明细扫描。
+        - 分组B（历史最高点落在 df 区间内/之后）：
+            ① 一次聚合拿到 df 起点之前的前置历史最高价 pre_max；
+            ② polars 内对区间 close 按 (jj_code, close_time) 升序做累计最大值 cum_close；
+            ③ historical_max_close = max(cum_close, pre_max)。
+            绝不用全历史 all_time_max 给分组B赋值（那是未来值）。
+        """
+        if df.is_empty():
+            return df.with_columns(historical_max_close=pl.lit(None, dtype=pl.Float64))
+
+        codes = df["jj_code"].unique().to_list()
+        min_time = df["close_time"].min()
+        time_unit = df["close_time"].dtype.time_unit
+        table_name = FuturesKline1H.__tablename__
+
+        # 一次聚合同时拿到：全历史最高、其出现时间、df 起点之前的前置历史最高
+        sql = f"""
+        SELECT
+            code,
+            max(close)                              AS all_time_max,
+            argMax(datetime, close)                 AS max_close_time,
+            maxIf(close, datetime < %(start)s)      AS pre_max
+        FROM {table_name}
+        WHERE code IN %(codes)s
+        GROUP BY code
+        """
+        df_stat = self.clickhouse.native_sql_read_table(
+            sql, {"codes": tuple(codes), "start": min_time}
+        )
+
+        if df_stat is None or len(df_stat) == 0:
+            return df.with_columns(historical_max_close=pl.lit(None, dtype=pl.Float64))
+
+        df_stat = pl.from_pandas(df_stat).rename({"code": "jj_code"})
+        df_stat = df_stat.with_columns(
+            max_close_time=pl.col("max_close_time").dt.cast_time_unit(time_unit),
+            # 该标的在 df 起点前无历史数据时，前置基准不抬升累计值
+            pre_max=pl.col("pre_max").fill_null(float("-inf")),
+        )
+
+        # 分组B：历史最高点在 df 起点之后 -> 需要累计
+        group_b = df_stat.filter(pl.col("max_close_time") > min_time)
+
+        # 把 all_time_max / pre_max 关联回原 df
+        df = df.join(
+            df_stat.select(["jj_code", "all_time_max", "pre_max"]),
+            on="jj_code",
+            how="left",
+        )
+
+        if not group_b.is_empty():
+            b_codes = group_b["jj_code"].to_list()
+            # 区间内累计最高（按标的、按 close_time 升序，即你说的 rolling/cumulative max）
+            df = df.with_columns(
+                cum_close=pl.col("close")
+                .cum_max()
+                .over("jj_code", order_by="close_time")
+            )
+            df = df.with_columns(
+                historical_max_close=pl.when(pl.col("jj_code").is_in(b_codes))
+                .then(pl.max_horizontal(pl.col("cum_close"), pl.col("pre_max")))
+                .otherwise(pl.col("all_time_max"))  # 分组A恒定值
+            ).drop("cum_close")
+        else:
+            # 全部是分组A
+            df = df.with_columns(historical_max_close=pl.col("all_time_max"))
+
+        return df.drop(["all_time_max", "pre_max"])
+
     def attach_future_info(self, df: pl.DataFrame, back_fill=True):
         start = df["close_time"].min()
         end = df["close_time"].max()
