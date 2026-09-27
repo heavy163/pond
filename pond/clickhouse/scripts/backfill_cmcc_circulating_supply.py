@@ -30,12 +30,17 @@ CMCCirculatingSupply 回填脚本（backward fill）
    解析，DateTime 列也返回 aware(Asia/Shanghai)。时间匹配一律用 epoch
    (toUnixTimestamp) 或显式 toDateTime64 字面量，不要拼裸字符串比较。
 
-2) kline_futures_1h 的 datetime 是 K 线 **close_time**（xx:59:59.999），
-   open_time 才是整点。两表对齐规则：
-        join_key = toStartOfMinute(kline.datetime + INTERVAL 1 SECOND)
-   即 "round(t + 1s, every=1min)"。用 open_time 去 join 看似 100% 匹配，
-   实则错配到**下一根未来 K 线**（未来函数）。
-   （本节算法不需要 klines，此条仅在需要价格时适用。）
+2) kline_futures_1h 的 datetime 是 K 线 **close_time** 的毫秒表示，恒为
+   xx:59:59.999（全表 1233 万行 100% 如此）；open_time 才是整点。
+   要得到该 bar 的**真实收盘时刻**必须**向上抹平**：
+        round(t + 1s, every=1m) → toStartOfMinute(datetime + INTERVAL 1 SECOND)
+   即 xx:59:59.999 → xx+1:00:00。**不要用 truncate("1h")**：那会向下抹到该 bar 的
+   开盘小时 xx:00，时间倒退近 1 小时，等于把 bar 标成它开始的那一刻。
+   而 OI/LSR 的 datetime 是整点瞬时快照，标签即快照时刻本身（实测 1h@T 与 5m@T
+   逐值相等，当前未走完的小时也会返回），因此向上抹平后的 close_time 与 OI/LSR
+   **直接等值 join** 即为收盘侧对齐：bar [xx:00, xx+1:00) ↔ OI@(xx+1:00)。
+   fangyang 因子管线（online_factor_generator.py::_join_oi_lsr）即此口径。
+   本回填算法不需要 klines，此条仅在需要价格时才适用。
 
 3) 非 Nullable 的 Float64 列存不了 NULL，空值在源表里是 **NaN**。
    `IS NULL` 恒假，必须用 `isNaN()`。
