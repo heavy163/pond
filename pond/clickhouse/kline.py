@@ -715,6 +715,45 @@ class CnFuturesKline1d(TsTable):
     )
 
 
+class CnFuturesContract1d(TsTable):
+    """
+    国内商品期货【逐合约】日线（交易所源 get_futures_daily + DCE 走新浪逐合约）
+
+    code 形如 RB2405 / M2409（具体合约），variety 形如 RB / M。
+
+    存在理由：主力连续（cn_futures_kline_1d）在换月处【价格拼接】有跳空，实测全表
+    3455 天（2.1%）是假跳空，平均 |收益| 476bp —— 例：RB0 在 2015-06-24 单日跳空
+    +980bp 而当日高低区间只有 76bp。直接拿主力连续算收益，波动率/回撤/趋势信号全错。
+    本表保留逐合约 OHLC + 持仓量 + 结算价，用于：
+      ① 每日按【持仓量最大】定主力合约；
+      ② 记录精确换月日（用于显式计提换月成本）；
+      ③ 用【同一合约内】的收益拼接出无跳空的连续收益序列。
+    """
+
+    __tablename__ = "cn_futures_contract_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="合约代码")
+    variety = Column(types.String, comment="品种")
+    market = Column(types.String, comment="交易所")
+    open = Column(types.Float64, comment="开盘价")
+    high = Column(types.Float64, comment="最高价")
+    low = Column(types.Float64, comment="最低价")
+    close = Column(types.Float64, comment="收盘价")
+    volume = Column(types.Float64, comment="成交量")
+    open_interest = Column(types.Float64, comment="持仓量")
+    settle = Column(types.Float64, comment="结算价")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            # 同 CnFuturesKline1d：长历史日线必须按年分区（按月会超 100 分区上限）
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
+
+
 class BondKlineDaily(TsTable):
     """
     可转债日线（新浪源 akshare.bond_zh_hs_cov_daily）
