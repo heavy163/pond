@@ -110,6 +110,10 @@ class BaoStockKline1dHfq(TsTable):
     peTTM = Column(types.Float64, comment="peTTM")
     psTTM = Column(types.Float64, comment="psTTM")
     pcfNcfTTM = Column(types.Float64, comment="pcfNcfTTM")
+    # 2026-10 新增：proxy 一直在拉这两个字段，此前因表无对应列被静默丢弃。
+    # 历史行为空的区间统一为 NaN（本项目「空值 = NaN」约定），故建表/加列用 DEFAULT nan。
+    pbMRQ = Column(types.Float64, comment="pbMRQ")
+    isST = Column(types.Float64, comment="isST")
 
     __table_args__ = (
         engines.ReplacingMergeTree(
@@ -542,7 +546,10 @@ class FundKlineDailyHFQ(TsTable):
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
+            # ⚠️ 必须按年分区。原为 toYYYYMM：ETF 全历史（2015→今）单标的就是 140+ 个分区，
+            # 超过 max_partitions_per_insert_block(100)，StockHelper 的单 symbol INSERT 会失败。
+            # 与 BaoStockKline1dHfq 口径一致。该表此前为空，重建无数据损失。
+            partition_by=func.toYear(datetime),
             order_by=(datetime, code),
             primary_key=(datetime, code),
         ),
@@ -673,5 +680,70 @@ class TokenLiquidity(Base):
             order_by=(symbol, chain, dex_id, pair_address),
             primary_key=(symbol, chain, dex_id, pair_address),
             version=synced_at,
+        ),
+    )
+
+
+class CnFuturesKline1d(TsTable):
+    """
+    国内商品期货【主力连续】日线（新浪源 akshare.futures_main_sina）
+
+    code 形如 RB0 / I0 / MA0（交易所主力连续代码），非具体合约。
+    注意：主力连续在换月处有跳空，回测需按换月规则另行拼接处理。
+    """
+
+    __tablename__ = "cn_futures_kline_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="代码")
+    open = Column(types.Float64, comment="开盘价")
+    high = Column(types.Float64, comment="最高价")
+    low = Column(types.Float64, comment="最低价")
+    close = Column(types.Float64, comment="收盘价")
+    volume = Column(types.Float64, comment="成交量")
+    open_interest = Column(types.Float64, comment="持仓量")
+    settle = Column(types.Float64, comment="动态结算价")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            # 长历史日线必须按年分区：单标的全历史（2015→今）按月分会有 140+ 个分区，
+            # 超过 ClickHouse max_partitions_per_insert_block（100）导致单次 INSERT 失败。
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
+
+
+class BondKlineDaily(TsTable):
+    """
+    可转债日线（新浪源 akshare.bond_zh_hs_cov_daily）
+
+    🚫 【暂缓 · 用户 2026-10-14 决定】本机无可用的可转债日线源，此表保留但不要使用：
+    新浪该接口对 2021 年后上市的活跃券覆盖极差 —— 12 只实测新券仅 3 只可取，
+    且只返回最近数日（6/9/23 行），sh 前缀还会返回错数据（127118 -> 2021-01-14 的 4 行）。
+    对「可转债轮动」这种要当前活跃券的策略是致命的。
+    后续若要用，三条路：① 装通达信（pond/tdx/ 有现成实现）② 买数据源 token（Tushare/聚宽/米筐）
+    ③ 每日快照累积（只有 go-forward 数据，无历史）。
+
+    该表仅含源实际提供的字段（无 amount / turn），不造空列。
+    """
+
+    __tablename__ = "bond_kline_1d"
+
+    datetime = Column(types.DateTime64, comment="date", primary_key=True)
+    code = Column(types.String, comment="code")
+    open = Column(types.Float64, comment="open")
+    high = Column(types.Float64, comment="high")
+    low = Column(types.Float64, comment="low")
+    close = Column(types.Float64, comment="close")
+    volume = Column(types.Float64, comment="volume")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            # 同 CnFuturesKline1d：长历史日线按年分区，避免单次 INSERT 超 100 分区
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
         ),
     )

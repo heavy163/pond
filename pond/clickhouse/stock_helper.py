@@ -152,7 +152,11 @@ class StockHelper:
             start_date=signal - timedelta(minutes=timeframe2minutes(interval) * 2),
             end_date=signal,
             filters=None,
-            rename=True,
+            # 注意：这里必须 rename=False。rename=True 会把列名换成 ORM 的 comment，
+            # 对中文注释的表（FundKlineDailyHFQ 等）会得到「日期」而非 datetime，
+            # 下面的 group_by(time_col) 就会抛 ColumnNotFoundError。
+            # 该 df 仅用于计数，用原始列名即可。
+            rename=False,
         )
         if latest_kline_df is None or len(latest_kline_df) == 0:
             logger.warning(
@@ -197,6 +201,15 @@ class StockHelper:
         future = executor.submit(query_func)
         return future.result(timeout=timeout)
 
+    def _reset_proxy_connection(self) -> None:
+        """
+        让数据源重建底层会话（若支持）。baostock 全局连接长跑会退化，
+        表现为后半程每次请求必超时；其余源无此方法则静默跳过。
+        """
+        reset = getattr(self.data_proxy, "reset_connection", None)
+        if callable(reset):
+            reset()
+
     def __sync_kline(
         self,
         signal: datetime,
@@ -209,6 +222,17 @@ class StockHelper:
     ):
         tid = threading.current_thread().ident
         res_dict[tid] = False
+        failed_symbols: list[str] = []
+        # baostock 全局连接长跑会退化，且退化点随「响应体积」前移：
+        #  · A股 72 天窗口（小响应）：约 3800~4200 次请求后整体超时
+        #  · ETF 全历史（2800+ 行大响应）：约 527 次请求 / 14 分钟后就整体失败
+        # 退化表现为 error_code=10002007「网络接收错误」（已被 get_klines 显式抛出）。
+        # 三种防线同时上：按条数、按时间、按连续错误。重建会话仅耗时 ~1s，宁多勿少。
+        relogin_every = 300
+        relogin_interval_seconds = 480
+        last_relogin = time.time()
+        timeout_streak = 0
+        timeout_streak_limit = 3
 
         if signal is None:
             signal = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
@@ -219,6 +243,17 @@ class StockHelper:
         latest_klines_df = pl.from_pandas(latest_klines_df)
 
         for i in range(0, len(symbols)):
+            if i > 0 and (
+                i % relogin_every == 0
+                or time.time() - last_relogin > relogin_interval_seconds
+            ):
+                # 周期性重建会话，避免 baostock 跑到后半程整体退化（见 reset_connection）
+                logger.info(
+                    f"已处理 {i} 只（距上次重建会话 {time.time() - last_relogin:.0f}s），"
+                    f"周期性重建源会话"
+                )
+                self._reset_proxy_connection()
+                last_relogin = time.time()
             logger.debug(
                 f"stock helper sync kline counting {i}/{len(symbols)} for {signal}"
             )
@@ -236,16 +271,46 @@ class StockHelper:
                 )
                 continue
 
+            def _fetch(sym: str, start_: datetime, end_: datetime):
+                return self._get_klines_with_timeout(
+                    symbol=sym,
+                    interval=interval,
+                    adjust=adjust,
+                    start=start_,
+                    end=end_,
+                    limit=1000,
+                    timeout=timeout,
+                )
+
             # 带超时的查询
-            klines_df = self._get_klines_with_timeout(
-                symbol=symbol,
-                interval=interval,
-                adjust=adjust,
-                start=lastest_record,
-                end=signal,
-                limit=1000,
-                timeout=timeout,
-            )
+            # ⚠️ 单只标的超时/连接抖动不得中断整轮同步：baostock 偶发 hang 至 60s+
+            # （实测 sz.002074 卡 62.6s），异常若逃逸会毁掉整轮任务。
+            try:
+                klines_df = _fetch(symbol, lastest_record, signal)
+                timeout_streak = 0
+            except Exception as e:
+                timeout_streak += 1
+                failed_symbols.append(f"{symbol}({type(e).__name__})")
+                logger.warning(
+                    f"stock helper sync kline {symbol} skipped by {type(e).__name__}: {e}"
+                )
+                if timeout_streak < timeout_streak_limit:
+                    continue
+                # 连续超时 = 会话已退化。重建连接后【重试本只】，
+                # 否则后半程会以 60s/只 的速度空转到收尾。
+                logger.warning(
+                    f"连续 {timeout_streak} 次超时，重建源会话并重试 {symbol}"
+                )
+                self._reset_proxy_connection()
+                timeout_streak = 0
+                try:
+                    klines_df = _fetch(symbol, lastest_record, signal)
+                except Exception as e2:
+                    logger.warning(
+                        f"stock helper sync kline {symbol} 重登后仍失败: "
+                        f"{type(e2).__name__}: {e2}"
+                    )
+                    continue
 
             if klines_df is not None and len(klines_df) > 0:
                 klines_df = klines_df[klines_df["datetime"] > lastest_record]
@@ -259,6 +324,11 @@ class StockHelper:
                 klines_df = klines_df.drop_duplicates(subset=["datetime"])
                 self.clickhouse.save_dataframe(table.__tablename__, klines_df)
 
+        if failed_symbols:
+            logger.warning(
+                f"stock helper sync kline {table.__tablename__} finished with "
+                f"{len(failed_symbols)}/{len(symbols)} symbols skipped: {failed_symbols[:30]}"
+            )
         res_dict[tid] = True
 
 
