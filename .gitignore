@@ -136,3 +136,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 .env.ini
+# 本地临时产物（迁移备份 / 分块日志等），不入库
+_cache/
