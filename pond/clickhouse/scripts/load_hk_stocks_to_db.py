@@ -299,8 +299,67 @@ def run_info() -> int:
     return rows
 
 
+# ── 市值 / 估值 ──────────────────────────────────────────────────────────────
+# 百度股市通的 period 会【降采样】，返回点数上限约 1,100：
+#   近一年=365(日) 近三年=1096(日) 近五年=913(≈2日) 近十年=731(周) 全部=628(2004起,双周)
+# 时点研究取「全部」覆盖最长；月度调仓下前值填充足够。
+VALUATION_INDICATORS = {"总市值": "mcap", "市盈率(TTM)": "pe_ttm", "市净率": "pb"}
+
+
+def fetch_valuation(code: str) -> dict[str, pd.Series]:
+    """单只港股的 市值/PE/PB 全历史（失败抛异常，由调用方计数）。"""
+    import akshare as ak
+    out: dict[str, pd.Series] = {}
+    for ind, col in VALUATION_INDICATORS.items():
+        d = ak.stock_hk_valuation_baidu(symbol=code, indicator=ind, period="全部")
+        if d is None or len(d) == 0:
+            continue
+        idx = pd.to_datetime(d["date"], errors="coerce")
+        vals = pd.to_numeric(d["value"], errors="coerce")
+        s = pd.Series(vals.to_numpy(), index=idx).dropna()
+        if len(s):
+            out[col] = s[~s.index.duplicated(keep="last")]
+    return out
+
+
+def run_valuation_batch(bi: int, n: int | None = None) -> int:
+    from pond.clickhouse.kline import HkValuation1d
+    codes = code_batches(n)[bi]
+    frames, ok, bad = [], 0, []
+    for c in codes:
+        try:
+            v = fetch_valuation(c)
+        except Exception:                                   # noqa: BLE001
+            bad.append(c)
+            continue
+        if v.get("mcap") is None or len(v) == 0:
+            bad.append(c)
+            continue
+        df = pd.DataFrame(v)
+        df.index.name = "datetime"
+        df = df.reset_index()
+        df["code"] = c
+        frames.append(df)
+        ok += 1
+    if not frames:
+        _log(f"val batch {bi}: 无数据（{len(codes)} 只全失败）")
+        return 0
+    allf = pd.concat(frames, ignore_index=True)
+    for col in ("mcap", "pe_ttm", "pb"):          # 必须含全部 ORM 列
+        if col not in allf:
+            allf[col] = float("nan")
+    allf = allf.dropna(subset=["datetime"])
+    allf = allf[allf["mcap"].fillna(0) > 0]
+    rows = _save(HkValuation1d, allf)
+    _log(f"val batch {bi}: {ok}/{len(codes)} 只有数据 → 写入 {rows} 行"
+         + (f"  失败 {len(bad)}: {bad[:8]}" if bad else ""))
+    return rows
+
+
 # ── 分块驱动 ─────────────────────────────────────────────────────────────────
-def run_all(timeout: int, retries: int, n: int | None = None) -> int:
+def _drive(flag: str, timeout: int, retries: int, n: int | None = None,
+           label: str = "batch") -> int:
+    """通用分块驱动：每块独立子进程 + 外部硬超时 + 进程组 SIGKILL + 重试 + 不中断整体。"""
     batches = code_batches(n)
     _log(f"共 {len(batches)} 块（每块 {BATCH_SIZE} 只），单块超时 {timeout}s，"
          f"失败重试 {retries} 次")
@@ -310,7 +369,7 @@ def run_all(timeout: int, retries: int, n: int | None = None) -> int:
         for attempt in range(1, retries + 1):
             t0 = time.time()
             proc = subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__), "--batch", str(i)]
+                [sys.executable, os.path.abspath(__file__), flag, str(i)]
                 + (["--n", str(n)] if n else []),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 start_new_session=True,
@@ -318,14 +377,14 @@ def run_all(timeout: int, retries: int, n: int | None = None) -> int:
             try:
                 out, _ = proc.communicate(timeout=timeout)
                 if proc.returncode == 0:
-                    _log(f"[{i+1}/{len(batches)}] ✅ batch {i}  "
+                    _log(f"[{i+1}/{len(batches)}] ✅ {label} {i}  "
                          f"尝试 {attempt}/{retries}  {time.time()-t0:.1f}s")
                     ok.append(i); done = True
                     break
-                _log(f"[{i+1}/{len(batches)}] ⚠️ batch {i} rc={proc.returncode} "
+                _log(f"[{i+1}/{len(batches)}] ⚠️ {label} {i} rc={proc.returncode} "
                      f"尝试 {attempt}/{retries}  尾部: {out.strip()[-300:]}")
             except subprocess.TimeoutExpired:
-                _log(f"[{i+1}/{len(batches)}] ⏱ batch {i} TIMEOUT {timeout}s → 杀进程组")
+                _log(f"[{i+1}/{len(batches)}] ⏱ {label} {i} TIMEOUT {timeout}s → 杀进程组")
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except Exception:                       # noqa: BLE001
@@ -337,13 +396,21 @@ def run_all(timeout: int, retries: int, n: int | None = None) -> int:
             if attempt < retries:
                 time.sleep(5)
         if not done:
-            _log(f"[{i+1}/{len(batches)}] ❌ batch {i} 重试 {retries} 次仍失败 → "
+            _log(f"[{i+1}/{len(batches)}] ❌ {label} {i} 重试 {retries} 次仍失败 → "
                  f"【不中断整体】，继续下一块")
             failed.append(i)
     _log(f"== 完成：成功 {len(ok)}/{len(batches)}，失败 {len(failed)} ==")
     if failed:
-        _log(f"失败块: {failed}（用 --batch <i> 单独重跑）")
+        _log(f"失败块: {failed}（用 {flag} <i> 单独重跑）")
     return 0 if not failed else 1
+
+
+def run_all(timeout: int, retries: int, n: int | None = None) -> int:
+    return _drive("--batch", timeout, retries, n, "batch")
+
+
+def run_valuation_all(timeout: int, retries: int, n: int | None = None) -> int:
+    return _drive("--val-batch", timeout, retries, n, "val")
 
 
 def main() -> int:
@@ -354,6 +421,8 @@ def main() -> int:
     ap.add_argument("--indices", action="store_true")
     ap.add_argument("--info", action="store_true")
     ap.add_argument("--fx", action="store_true")
+    ap.add_argument("--valuation", action="store_true", help="全市场市值/PE/PB 回填（分块）")
+    ap.add_argument("--val-batch", type=int, help="跑单块市值（0-based，内部用）")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--retries", type=int, default=3)
@@ -365,8 +434,13 @@ def main() -> int:
         return 0
     if a.all:
         return run_all(a.timeout, a.retries, a.n)
+    if a.valuation:
+        return run_valuation_all(a.timeout, a.retries, a.n)
     if a.batch is not None:
         run_batch(a.batch, a.n)
+        return 0
+    if a.val_batch is not None:
+        run_valuation_batch(a.val_batch, a.n)
         return 0
     if a.indices:
         run_indices()
@@ -375,7 +449,7 @@ def main() -> int:
     if a.fx:
         run_fx()
     if not (a.indices or a.info or a.fx):
-        ap.error("需要 --all / --list / --batch / --indices / --info / --fx")
+        ap.error("需要 --all / --list / --batch / --indices / --info / --fx / --valuation")
     return 0
 
 

@@ -921,3 +921,36 @@ class FxRate1d(TsTable):
             primary_key=(datetime, code),
         ),
     )
+
+
+class HkValuation1d(TsTable):
+    """
+    港股市值/估值（百度股市通 akshare.stock_hk_valuation_baidu）
+
+    为什么需要：`hk_kline_1d` 只有价格、没有股本 ⇒ 做不了「规模因子」与「市值加权」，
+    也分不清「低波动」是真信号还是「大市值」的代理 —— 这是截面研究必补的一块。
+
+    ⚠️ 该源按 period 参数**降采样**，返回点数上限约 1,100：
+      · 近一年 → 365 点（日度）      · 近三年 → 1,096 点（日度）
+      · 近五年 → 913 点（≈2 交易日） · 近十年 → 731 点（周度）
+      · 全部   → 628 点（2004 起，双周度）
+    ⇒ 时点研究取 `全部`（覆盖最长），月度调仓下按前值填充即可。
+
+    单位：总市值 = 亿港币（00700 于 2026-10-15 为 37,989.1 亿 ≈ 3.8 万亿港币）。
+    """
+
+    __tablename__ = "hk_valuation_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="代码")
+    mcap = Column(types.Float64, comment="总市值")
+    pe_ttm = Column(types.Float64, comment="市盈率TTM")
+    pb = Column(types.Float64, comment="市净率")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
