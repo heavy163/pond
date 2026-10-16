@@ -5,6 +5,25 @@ from clickhouse_sqlalchemy import (
 )
 from pond.clickhouse import TsTable
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 本模块的公共约定（2026-10 修订，改动原因见下）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# ① `datetime` = 【公告日】（信息可观测时点），不是报告期。
+#    全库其他表都是这个口径（kline 的 datetime = bar 收盘时刻）。
+#    若把 datetime 设成报告期，最自然的写法 `GROUP BY datetime` 会直接变成
+#    未来函数（报告期末时点该信息还没公开）。报告期单独放 report_date。
+#    `publish_date` 与 datetime 恒等，保留是为了与源头字段（UPDATE_DATE）对账；
+#    loader 必须断言两者相等。
+#
+# ② 主键必须含【股东身份】。同一只股票在同一公告日有最多 10+ 个流通股东，
+#    只按 (datetime, code) 做 ORDER BY 会让 ReplacingMergeTree 把 10 行压成 1 行
+#    —— 沙箱实测丢 90% 且不报错（复现：report/manual/institution_follow/
+#    scripts/sandbox_holder_ddl.py）。源不提供 HOLDER_ID，故用 name 作身份键。
+#
+# ③ partition_by 用 toYear 而非 toYYYYMM：单表跨 20 年（>240 个月）时，
+#    一次 INSERT 会撞 ClickHouse `max_partitions_per_insert_block=100`。
+
 
 class FreeHoldingDetail(TsTable):
     """
@@ -13,7 +32,7 @@ class FreeHoldingDetail(TsTable):
 
     __tablename__ = "FreeHoldingDetail"
 
-    datetime = Column(types.DateTime64, comment="时间", primary_key=True)
+    datetime = Column(types.DateTime64, comment="时间(公告日)", primary_key=True)
     code = Column(types.String, comment="股票代码")
     name = Column(types.String, comment="股东名称")
     nature = Column(types.String, comment="股东类型")
@@ -23,12 +42,19 @@ class FreeHoldingDetail(TsTable):
     volume_change_percent = Column(types.Float64, comment="期末持股-数量变化比例")
     report_date = Column(types.DateTime64, comment="报告期")
     publish_date = Column(types.DateTime64, comment="公告日")
+    # ── 2026-10 新增：分析必需、但原 schema 缺失 ────────────────────────────
+    holder_rank = Column(types.Float64, comment="股东排名")
+    holder_newtype = Column(types.String, comment="股东类型(粗分)")
+    shares_type = Column(types.String, comment="股份类型")
+    free_holdnum_ratio = Column(types.Float64, comment="持股占流通股比")
+    holder_code = Column(types.String, comment="股东代码")
+    security_name = Column(types.String, comment="股票简称")
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
-            order_by=(datetime, code),
-            primary_key=(datetime, code),
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code, name),
+            primary_key=(datetime, code, name),
         ),
     )
 
@@ -39,7 +65,8 @@ class HoldingDetail(TsTable):
     """
     持股明细-十大股东
     """
-    datetime = Column(types.DateTime64, comment="时间", primary_key=True)
+
+    datetime = Column(types.DateTime64, comment="时间(公告日)", primary_key=True)
     code = Column(types.String, comment="股票代码")
     name = Column(types.String, comment="股东名称")
     nature = Column(types.String, comment="股东类型")
@@ -50,12 +77,17 @@ class HoldingDetail(TsTable):
     holder_rank = Column(types.Float64, comment="股东排名")
     report_date = Column(types.DateTime64, comment="报告期")
     publish_date = Column(types.DateTime64, comment="公告日")
+    # ── 2026-10 新增 ─────────────────────────────────────────────────────────
+    holder_newtype = Column(types.String, comment="股东类型(粗分)")
+    shares_type = Column(types.String, comment="股份类型")
+    holder_code = Column(types.String, comment="股东代码")
+    security_name = Column(types.String, comment="股票简称")
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
-            order_by=(datetime, code),
-            primary_key=(datetime, code),
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code, name),
+            primary_key=(datetime, code, name),
         ),
     )
 
@@ -63,11 +95,14 @@ class HoldingDetail(TsTable):
 class FreeHoldingStatistic(TsTable):
     """
     持股统计-十大流通股东
+
+    ⚠️ 主键必须含 name：同一 datetime（公告日）下有【多个机构】，
+    原 ORDER BY=(datetime) 会把所有机构压成 1 行。表为空时修正成本为零。
     """
 
     __tablename__ = "FreeHoldingStatistic"
 
-    datetime = Column(types.DateTime64, comment="时间", primary_key=True)
+    datetime = Column(types.DateTime64, comment="时间(公告日)", primary_key=True)
     name = Column(types.String, comment="股东名称")
     nature = Column(types.String, comment="股东类型")
     stat_counts = Column(types.Float64, comment="统计次数")
@@ -99,12 +134,14 @@ class FreeHoldingStatistic(TsTable):
         types.Float64, comment="公告日后涨幅统计-60个交易日-最小涨幅"
     )
     holding_codes = Column(types.String, comment="持有个股")
+    # ── 2026-10 新增 ─────────────────────────────────────────────────────────
+    report_date = Column(types.DateTime64, comment="报告期")
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
-            order_by=(datetime),
-            primary_key=(datetime),
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, name),
+            primary_key=(datetime, name),
         ),
     )
 
@@ -116,7 +153,7 @@ class HoldingStatistic(TsTable):
 
     __tablename__ = "HoldingStatistic"
 
-    datetime = Column(types.DateTime64, comment="时间", primary_key=True)
+    datetime = Column(types.DateTime64, comment="时间(公告日)", primary_key=True)
     code = Column(types.String, comment="股票代码")
     name = Column(types.String, comment="股东名称")
     nature = Column(types.String, comment="股东类型")
@@ -149,12 +186,14 @@ class HoldingStatistic(TsTable):
         types.Float64, comment="公告日后涨幅统计-60个交易日-最小涨幅"
     )
     holding_codes = Column(types.String, comment="持有个股")
+    # ── 2026-10 新增 ─────────────────────────────────────────────────────────
+    report_date = Column(types.DateTime64, comment="报告期")
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
-            order_by=(datetime, code),
-            primary_key=(datetime, code),
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code, name),
+            primary_key=(datetime, code, name),
         ),
     )
 
@@ -162,6 +201,9 @@ class HoldingStatistic(TsTable):
 class HolderCounts(TsTable):
     """
     股东户数
+
+    主键 (datetime, code) 本来就唯一（一行一个 code），无需改动；
+    仅把 partition_by 从 toYYYYMM 改为 toYear，与同组表保持一致。
     """
 
     __tablename__ = "HolderCounts"
@@ -183,7 +225,7 @@ class HolderCounts(TsTable):
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
+            partition_by=func.toYear(datetime),
             order_by=(datetime, code),
             primary_key=(datetime, code),
         ),
@@ -191,6 +233,13 @@ class HolderCounts(TsTable):
 
 
 class StockRestrictedReleaseDetail(TsTable):
+    """
+    限售股解禁明细
+
+    ⚠️ 主键必须含 release_date：同一只股票在不同解禁日有多条记录，
+    原 ORDER BY=(datetime, code) 会把同股多次解禁压成 1 行。
+    """
+
     __tablename__ = "StockRestrictedReleaseDetail"
 
     datetime = Column(types.DateTime64, comment="时间", primary_key=True)
@@ -206,8 +255,8 @@ class StockRestrictedReleaseDetail(TsTable):
 
     __table_args__ = (
         engines.ReplacingMergeTree(
-            partition_by=func.toYYYYMM(datetime),
-            order_by=(datetime, code),
-            primary_key=(datetime, code),
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code, release_date),
+            primary_key=(datetime, code, release_date),
         ),
     )
