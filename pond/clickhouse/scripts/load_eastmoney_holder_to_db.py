@@ -64,7 +64,7 @@ def main() -> int:
           f"本块 offset={off} limit={lim} ⇒ {len(chunk)} 期 "
           f"[{chunk[0]} ~ {chunk[-1]}]；execute={args.execute}", flush=True)
 
-    ok, empty, failed, rows_total = [], [], [], 0
+    ok, empty, failed, dropped, rows_total = [], [], [], [], 0
     t0 = time.time()
     for i, rd in enumerate(chunk, 1):
         try:
@@ -78,17 +78,28 @@ def main() -> int:
             print(f"  ·  {rd}: 无数据（跳过）", flush=True)
             continue
 
+        # ⚠️ 空公告日的行必须丢弃：没有公告日就确定不了「信息何时可得」，
+        # 无法做无未来函数回测。**不能**用 report_date 兜底（那是未来函数）。
+        # 另注意 pandas 里 (NaT != NaT) 为 True，会让下面的相等断言误报。
+        n_na = int(df["datetime"].isna().sum())
+        if n_na:
+            df = df[df["datetime"].notna()].copy()
+            dropped.append((rd, n_na))
+
         # 不变量：公告日既是 datetime 也是 publish_date
         bad = (df["datetime"] != df["publish_date"]).sum()
         assert bad == 0, f"{rd}: datetime 与 publish_date 不等的有 {bad} 行"
-        assert df["datetime"].notna().all(), f"{rd}: 有缺失公告日"
         assert df["report_date"].notna().all(), f"{rd}: 有缺失报告期"
         assert df["code"].notna().all() and df["name"].notna().all(), f"{rd}: code/name 有缺失"
 
-        dup = df.duplicated(subset=["datetime", "code", "name"]).sum()
+        # 去重键必须与表的主键【完全一致】。主键含 report_date：
+        # 年报与一季报可能同日披露，同一 (公告日, 股票, 股东) 在两个报告期各有一行，
+        # 两者都合法（漏掉 report_date 实测导致 Q4 期丢 22~37%）。
+        KEY = ["datetime", "report_date", "code", "name"]
+        dup = df.duplicated(subset=KEY).sum()
         if dup:
-            print(f"  ⚠️ {rd}: 主键 (datetime,code,name) 重复 {dup} 行，已去重", flush=True)
-            df = df.drop_duplicates(subset=["datetime", "code", "name"])
+            print(f"  ⚠️ {rd}: 主键 {tuple(KEY)} 重复 {dup} 行，已去重", flush=True)
+            df = df.drop_duplicates(subset=KEY)
 
         if args.execute:
             manager.save_dataframe(table, df)
@@ -102,6 +113,13 @@ def main() -> int:
     print(f"\n=== 本块小结（{'已写库' if args.execute else 'dry-run，未写库'}）===")
     print(f"  成功 {len(ok)} 期 / 空 {len(empty)} / 失败 {len(failed)} ｜ 行数 {rows_total:,}"
           f" ｜ 耗时 {time.time()-t0:.0f}s")
+    if dropped:
+        tot = sum(n for _, n in dropped)
+        print(f"  ⚠️ 丢弃 {tot} 行（公告日为空，无法定位信息可得时点）: {dropped}")
+        if tot / max(tot + rows_total, 1) > 0.01:
+            print("  ⚠️⚠️ 丢弃比例 >1%，需人工复核源数据")
+        assert tot / max(tot + rows_total, 1) < 0.05, \
+            f"公告日缺失比例 {tot/(tot+rows_total)*100:.1f}% 过高，拒绝静默通过"
     if failed:
         print(f"  失败清单: {failed}")
 
@@ -110,7 +128,8 @@ def main() -> int:
         from pathlib import Path
         Path(res_path).write_text(json.dumps(
             {"report": report, "offset": off, "limit": lim, "ok": ok, "empty": empty,
-             "failed": failed, "rows": rows_total, "executed": bool(args.execute),
+             "failed": failed, "rows": rows_total, "dropped_no_date": dropped,
+             "executed": bool(args.execute),
              "finished_at": datetime.now().isoformat(timespec="seconds")},
             ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"  块结果 → {res_path}")

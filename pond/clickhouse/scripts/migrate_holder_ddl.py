@@ -51,6 +51,9 @@ def live_ddl(c, table: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--execute", action="store_true", help="真正执行 DROP+CREATE（默认只读）")
+    ap.add_argument("--drop-nonempty", action="store_true",
+                    help="允许重建非空表（会丢数据）。仅当数据可从源头完整重拉时使用；"
+                         "当前 holder 表即属此类：源为东财公开接口，重拉成本约 50 分钟。")
     args = ap.parse_args()
 
     # ── ORM 侧：编译出期望 DDL ────────────────────────────────────────────────
@@ -77,10 +80,13 @@ def main() -> int:
     BACKUP.write_text(json.dumps(backup, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"  备份 → {BACKUP}")
 
-    if blocked:
+    if blocked and not args.drop_nonempty:
         print(f"\n❌ 拒绝执行：以下表非空 {blocked}。"
-              f"重建会丢数据，必须先人工确认迁移策略。")
+              f"重建会丢数据，必须先人工确认迁移策略。"
+              f"\n   若数据可从源头完整重拉，加 --drop-nonempty 明确承担数据丢失。")
         return 1
+    if blocked:
+        print(f"\n⚠️  --drop-nonempty 已开启：以下非空表将被 DROP 重建 {blocked}")
 
     print("\n=== ② ORM 编译出的期望 DDL ===")
     # 只建 engine 取 dialect —— 不实例化 ClickHouseManager，
@@ -95,6 +101,12 @@ def main() -> int:
         expect[t] = sql
         ob = sql.split("ORDER BY")[1].split("\n")[0].strip() if "ORDER BY" in sql else "?"
         print(f"  {t:32s} ORDER BY={ob}")
+        # 自检：ORDER BY 的每一列必须真在表里。写错列名不会报错，只会让
+        # ReplacingMergeTree 按【错误子集】去重 —— 这正是本轮丢 22~37% 行的成因。
+        if ob != "?":
+            ob_cols = [x.strip() for x in ob.strip().strip("()").split(",")]
+            missing = [x for x in ob_cols if x not in tbl.columns]
+            assert not missing, f"{t}: ORDER BY 引用了不存在的列 {missing}"
 
     if not args.execute:
         print("\n[dry-run] 未执行任何写操作。加 --execute 才会 DROP+CREATE。")

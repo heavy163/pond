@@ -21,7 +21,13 @@ from pond.clickhouse import TsTable
 #    —— 沙箱实测丢 90% 且不报错（复现：report/manual/institution_follow/
 #    scripts/sandbox_holder_ddl.py）。源不提供 HOLDER_ID，故用 name 作身份键。
 #
-# ③ partition_by 用 toYear 而非 toYYYYMM：单表跨 20 年（>240 个月）时，
+# ③ 主键还必须含【report_date】。年报与一季报常年同日披露，同一股东、同一股票、
+#    同一公告日但不同报告期 ⇒ 键完全相同，ReplacingMergeTree 会把先生成的报告期
+#    整行覆盖掉。实测后果：87 期全量回补后，Q4/年报期比源头少 22~37%
+#    （如 2024-12-31 源 54,165 / 库 33,846），而 Q1~Q3 只差 1~22 行（正常空公告日丢弃）。
+#    最阴险的是它【完全不报错】：INSERT 回报 saved 39,261，查询却只见到 26,592。
+#
+# ④ partition_by 用 toYear 而非 toYYYYMM：单表跨 20 年（>240 个月）时，
 #    一次 INSERT 会撞 ClickHouse `max_partitions_per_insert_block=100`。
 
 
@@ -53,8 +59,8 @@ class FreeHoldingDetail(TsTable):
     __table_args__ = (
         engines.ReplacingMergeTree(
             partition_by=func.toYear(datetime),
-            order_by=(datetime, code, name),
-            primary_key=(datetime, code, name),
+            order_by=(datetime, report_date, code, name),
+            primary_key=(datetime, report_date, code, name),
         ),
     )
 
@@ -86,8 +92,8 @@ class HoldingDetail(TsTable):
     __table_args__ = (
         engines.ReplacingMergeTree(
             partition_by=func.toYear(datetime),
-            order_by=(datetime, code, name),
-            primary_key=(datetime, code, name),
+            order_by=(datetime, report_date, code, name),
+            primary_key=(datetime, report_date, code, name),
         ),
     )
 
@@ -140,8 +146,8 @@ class FreeHoldingStatistic(TsTable):
     __table_args__ = (
         engines.ReplacingMergeTree(
             partition_by=func.toYear(datetime),
-            order_by=(datetime, name),
-            primary_key=(datetime, name),
+            order_by=(datetime, report_date, name),
+            primary_key=(datetime, report_date, name),
         ),
     )
 
@@ -192,8 +198,8 @@ class HoldingStatistic(TsTable):
     __table_args__ = (
         engines.ReplacingMergeTree(
             partition_by=func.toYear(datetime),
-            order_by=(datetime, code, name),
-            primary_key=(datetime, code, name),
+            order_by=(datetime, report_date, code, name),
+            primary_key=(datetime, report_date, code, name),
         ),
     )
 
@@ -202,8 +208,9 @@ class HolderCounts(TsTable):
     """
     股东户数
 
-    主键 (datetime, code) 本来就唯一（一行一个 code），无需改动；
-    仅把 partition_by 从 toYYYYMM 改为 toYear，与同组表保持一致。
+    主键必须含 report_date：年报与一季报可能【同日披露】，同一 code 两个
+    报告期的行会在 (datetime, code) 上撞键，被 ReplacingMergeTree 压成一行
+    （实测 FreeHoldingDetail 因此丢了 22~37% 的 Q4 行）。
     """
 
     __tablename__ = "HolderCounts"
@@ -226,8 +233,8 @@ class HolderCounts(TsTable):
     __table_args__ = (
         engines.ReplacingMergeTree(
             partition_by=func.toYear(datetime),
-            order_by=(datetime, code),
-            primary_key=(datetime, code),
+            order_by=(datetime, report_date, code),
+            primary_key=(datetime, report_date, code),
         ),
     )
 
