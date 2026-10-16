@@ -173,5 +173,10 @@ class EastMoneyHolderProxy:
         for c in ("code", "name", "nature", "holder_newtype", "shares_type",
                   "holder_code", "security_name"):
             if c in out.columns:
-                out[c] = out[c].astype(str)
+                # ⚠️ 必须先 fillna("")。pandas 3.0 的 astype(str) 对含 NaN 的列会产出
+                # 【可空字符串 dtype】，tolist() 又吐回 float('nan') ⇒
+                # clickhouse native writer 报
+                # `AttributeError: 'float' object has no attribute 'encode'`
+                # （实测 2005~2007 早期间必然触发，早期 HOLDER_CODE 大量缺失）。
+                out[c] = out[c].fillna("").astype(str)
         return out
