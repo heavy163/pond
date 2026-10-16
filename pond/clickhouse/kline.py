@@ -786,3 +786,138 @@ class BondKlineDaily(TsTable):
             primary_key=(datetime, code),
         ),
     )
+
+
+class HkKline1d(TsTable):
+    """
+    港股日线（东财源 akshare.stock_hk_hist，后复权）
+
+    为什么选东财而不是新浪：新浪 stock_hk_daily 不返回成交额/换手率；东财给
+    【后复权 + 成交量 + 成交额 + 换手率】，字段更全。实测 12 只跨板块抽样
+    （含 GEM 08xxx / 红筹 / 二次上市）全部 0 NaN，且 IPO 起始日准确
+    （09988 阿里巴巴从 2019-11-26 二次上市日起，而非更早）。
+
+    ⚠️⚠️ 幸存者偏差（报告里必须写明）：universe 取自【当前在市】列表
+    akshare.stock_hk_spot_em（4737 只）。已退市港股在本源拿不到 ⇒
+    任何「港股全市场」回测都系统性高估。港股退市率低于 A股，但仍非零：
+    实测 08083 的数据只到 2026-04-16（后续停更/停牌），说明源会保留
+    "走过一段然后停掉" 的记录，但【从未出现在当前列表的】标的永远拿不到。
+
+    ⚠️ 流动性：4737 只里 2608 只（55%）当日成交额为 0 —— 港股超半数是无成交的
+    仙股/壳股。成交额 > 1000 万港币的只有 461 只。研究侧必须先做流动性 universe，
+    否则「全市场等权」会被 2000+ 只零成交标的彻底扭曲。
+    """
+
+    __tablename__ = "hk_kline_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="代码")
+    open = Column(types.Float64, comment="开盘")
+    high = Column(types.Float64, comment="最高")
+    low = Column(types.Float64, comment="最低")
+    close = Column(types.Float64, comment="收盘")
+    volume = Column(types.Float64, comment="成交量")
+    amount = Column(types.Float64, comment="成交额")
+    turn = Column(types.Float64, comment="换手率")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            # 同 CnFuturesKline1d：长历史日线必须按年分区（按月会超 100 分区上限）
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
+
+
+class HkIndex1d(TsTable):
+    """
+    港股指数日线（东财源 akshare.stock_hk_index_daily_em）
+
+    基准：HSI 恒生指数 / HSTECH 恒生科技指数 / HSCEI 国企指数。
+    HSI 可回溯 1990-05、HSCEI 1993-07、HSTECH 2014-12（指数基日）。
+
+    源列名是 latest（不是 close），此处统一映射到 close。
+    源不提供成交量/成交额，不造空列。指数不计复权（本就是价格指数）。
+    """
+
+    __tablename__ = "hk_index_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="代码")
+    open = Column(types.Float64, comment="开盘")
+    high = Column(types.Float64, comment="最高")
+    low = Column(types.Float64, comment="最低")
+    close = Column(types.Float64, comment="收盘")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
+
+
+class HkStockInfo(TsTable):
+    """
+    港股基础信息快照（东财源 akshare.stock_hk_spot_em）
+
+    ⚠️ 这是【快照】不是【时点清单】：只有当前在市股票，无法回答「2020 年 3 月
+    港股通/主板有哪些股票」。做时点 universe 需要另找历史成分股源。
+    多日快照可按 datetime 共存（ReplacingMergeTree ORDER BY (datetime, code)）。
+
+    ⚠️ 该源【只有 12 列】(序号/代码/名称/最新价/涨跌额/涨跌幅/今开/最高/最低/昨收/
+    成交量/成交额)，**不含总市值与市盈率** —— 故本表不设这两列（不造空列，同
+    BondKlineDaily 的处理）。要市值/PE 需另找源：
+      · 个股：ak.stock_hk_valuation_baidu(symbol, indicator="总市值")
+      · 个股：ak.stock_individual_basic_info_hk_xq(symbol)（雪球）
+    或者用 close × 总股本自算（需另补股本数据）。
+    """
+
+    __tablename__ = "hk_stock_info"
+
+    datetime = Column(types.DateTime64, comment="快照日", primary_key=True)
+    code = Column(types.String, comment="代码")
+    name = Column(types.String, comment="名称")
+    board = Column(types.String, comment="板块")
+    last = Column(types.Float64, comment="最新价")
+    amount = Column(types.Float64, comment="成交额")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
+
+
+class FxRate1d(TsTable):
+    """
+    人民币汇率中间价日线（新浪源 akshare.currency_boc_sina）
+
+    为什么需要：港股以【港币】计价，人民币账户持有港股资产时，汇率变动直接进入收益。
+    实测 HKDCNY 央行中间价 78.89（2015-01-01）→ 85.658（2026-10-16），
+    11 年累计 +8.6%（约 +0.75%/年）—— 对年化 5~10% 的策略不是可忽略的量。
+    做「人民币视角」的港股回测必须用它换算，否则会把汇率损益算进 alpha/beta。
+
+    取【央行中间价】，不取 中行汇买价/钞卖价：后两者含银行点差，
+    会把买卖价差当成汇率波动混进收益序列。
+
+    单位：100 外币兑人民币（HKDCNY=85.658 表示 100 港币 = 85.658 人民币）。
+    """
+
+    __tablename__ = "fx_rate_1d"
+
+    datetime = Column(types.DateTime64, comment="日期", primary_key=True)
+    code = Column(types.String, comment="货币对")
+    rate = Column(types.Float64, comment="央行中间价")
+
+    __table_args__ = (
+        engines.ReplacingMergeTree(
+            partition_by=func.toYear(datetime),
+            order_by=(datetime, code),
+            primary_key=(datetime, code),
+        ),
+    )
