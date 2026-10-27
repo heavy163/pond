@@ -1,0 +1,44 @@
+# cryptos 采集配置
+#
+# 优先级：cryptos.venue_config（DB，运行时覆盖） > 本文件 > 代码默认值
+# 动态启停：往 venue_config 插一行 enabled=0，下一轮生效，无需重启容器。
+#
+# 限频初始值都是【保守的 50%】，上线后按响应头与 429 反馈再调。
+# 各所口径不同（weight/min vs req/2s），务必以官方文档为准逐所复核。
+
+global:
+  lookback_hours: 6          # 每轮回溯 6 小时，幂等重写（防漏 5 小时）
+  max_total_connections: 64  # 保护本机 FD/内存，不是 API 限额
+  round_budget_sec: 3300     # 一轮硬上限（周期 3600s）
+
+venues:
+  binance:
+    enabled: true
+    concurrency: 8
+    deadline_sec: 3000       # 单所 50 分钟
+    timeout_sec: 15
+    max_retries: 3
+    data: [kline, funding, oi]   # spot / mark 按需打开
+    symbols:
+      include: []            # 子串匹配 raw symbol，如 [USDT] 或 [BTCUSDT, ETHUSDT]
+      exclude: [USDC, BUSD, "_"]
+      top_n: 30              # 0 = 不限；当前按字母序，P2 改按成交额排名
+    buckets:
+      # Binance USDT-M 官方 2400 weight/min，这里只用一半
+      default: {mode: weight, rate: 1200, window: 60, burst: 1.0}
+      kline:   {mode: weight, rate: 1200, window: 60, burst: 1.0}
+      # /futures/data/* 官方 1000 req/5min ≈ 3.3/s，取 2/s
+      oi:      {mode: requests, rate: 120, window: 60, burst: 2.0}
+      # fundingRate 计入 2400 weight/min，2/s 只占 5%
+      funding: {mode: requests, rate: 120, window: 60, burst: 2.0}
+      meta:    {mode: requests, rate: 10, window: 60, burst: 1.0}
+
+  # ---- 以下为 P1 待接入，适配器写好后把 enabled 打开即可 ----
+  okx:
+    enabled: false
+    concurrency: 10
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 10, window: 1, burst: 1.0}   # 官方 20/2s
+      candles: {mode: requests, rate: 20, window: 1, burst: 1.0}
