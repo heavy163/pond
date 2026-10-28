@@ -103,6 +103,17 @@ COLUMNS: dict[str, list[str]] = {
         "err",
         "updated_at",
     ],
+    TABLE_COVERAGE: [
+        "venue",
+        "code",
+        "trade_date",
+        "n_kline",
+        "n_oi",
+        "n_funding",
+        "checked_at",
+        "status",
+        "note",
+    ],
 }
 
 # 表 → 时间列（用于覆盖度查询与 FINAL 去重窗口）

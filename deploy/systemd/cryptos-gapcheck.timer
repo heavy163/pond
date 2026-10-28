@@ -1,0 +1,12 @@
+[Unit]
+Description=每日 00:20 检查并修复 cryptos 数据缺口
+
+[Timer]
+# 00:05 刷合约清单 → 00:20 查缺口（避开 :02 整轮同步）
+OnCalendar=*-*-* 00:20:00
+Persistent=true
+AccuracySec=1min
+Unit=cryptos-gapcheck.service
+
+[Install]
+WantedBy=timers.target

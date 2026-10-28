@@ -182,3 +182,45 @@ def test_backfill_rate_is_halved():
     live = runner.config.get("gate")
     for k, b in spec.buckets.items():
         assert b.rate <= live.buckets[k].rate * 0.5 + 1e-9
+
+
+# ---------------- 缺口可修复性分类 ----------------
+
+
+def _detector():
+    from pond.cryptos.config import CryptosConfig
+    from pond.cryptos.gaps import GapDetector
+
+    return GapDetector(store=None, config=CryptosConfig.load("configs/cryptos.yaml"))
+
+
+def test_oi_repairability_matches_exchange_history_depth():
+    """只有 Gate(179d)/Bybit(7d) 能补 OI，其余 6 家永久丢失。"""
+    import datetime as dt
+
+    d = _detector()
+    today = dt.datetime.now(dt.timezone.utc).date()
+    assert d._repairable("gate", "oi", today) is True
+    assert d._repairable("bybit", "oi", today) is True
+    for v in ("okx", "bitget", "kucoin", "mexc", "htx", "hyperliquid"):
+        assert d._repairable(v, "oi", today) is False, v
+
+
+def test_oi_beyond_exchange_window_is_lost():
+    import datetime as dt
+
+    d = _detector()
+    today = dt.datetime.now(dt.timezone.utc).date()
+    assert d._repairable("gate", "oi", today - dt.timedelta(days=200)) is False
+    assert d._repairable("bybit", "oi", today - dt.timedelta(days=30)) is False
+    # K线永远可补（交易所都给全历史）
+    assert d._repairable("okx", "kline", today - dt.timedelta(days=2000)) is True
+
+
+def test_lost_reason_is_explicit():
+    import datetime as dt
+
+    d = _detector()
+    today = dt.datetime.now(dt.timezone.utc).date()
+    reason = d._why_lost("okx", "oi", today)
+    assert "无历史接口" in reason and "永久" in reason
