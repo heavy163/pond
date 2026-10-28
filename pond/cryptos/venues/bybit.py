@@ -24,6 +24,7 @@ HOUR_MS = 3600 * 1000
 class BybitAdapter(VenueAdapter):
     name = "bybit"
     BASE = "https://api.bybit.com"
+    _px: dict[str, float] | None = None      # ticker 价格缓存（本轮内有效）
 
     async def instruments(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -76,7 +77,9 @@ class BybitAdapter(VenueAdapter):
         cursor = start_ms
         out: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        SPAN = 1000 * HOUR_MS       # ★ 单页 1000 根；必须按固定窗推进，不能按返回最大值推进
         while cursor < end_ms:
+            page_end = min(cursor + SPAN, end_ms)
             d = await self.request(
                 f"{self.BASE}/v5/market/kline",
                 {
@@ -84,7 +87,7 @@ class BybitAdapter(VenueAdapter):
                     "symbol": raw_code,
                     "interval": "60",
                     "start": cursor,
-                    "end": end_ms - 1,
+                    "end": page_end - 1,
                     "limit": 1000,
                 },
                 endpoint="kline",
@@ -115,12 +118,7 @@ class BybitAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
-            newest = int(rows[0][0])
-            if newest <= cursor:
-                break
-            cursor = newest + HOUR_MS
-            if len(rows) < 1000:
-                break
+            cursor = page_end
         return out
 
     async def funding(
@@ -171,10 +169,31 @@ class BybitAdapter(VenueAdapter):
             if start_ms <= int(r["fundingRateTimestamp"]) < end_ms
         ]
 
+    async def _ensure_tickers(self) -> None:
+        """一次拉全部 linear ticker，缓存到本轮结束（1 请求换 500+ 合约的价格）。"""
+        if self._px is not None:
+            return
+        self._px = {}
+        d = await self.request(
+            f"{self.BASE}/v5/market/tickers",
+            {"category": "linear"},
+            endpoint="tickers",
+            cost=1,
+        )
+        for t in (d.get("result") or {}).get("list") or []:
+            try:
+                self._px[t["symbol"]] = float(t["lastPrice"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    def _last_price(self, raw_code: str) -> float:
+        return float((self._px or {}).get(raw_code, 0.0))
+
     async def open_interest(
         self, raw_code: str, start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         code = self.resolve_code(raw_code)
+        await self._ensure_tickers()
         start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
         cursor_end = end_ms
         out: list[dict[str, Any]] = []
@@ -201,13 +220,18 @@ class BybitAdapter(VenueAdapter):
                 if ts < start or ts >= end:
                     continue
                 oi = float(r["openInterest"])
+                # Bybit 的 open-interest 接口不带 U 口径。只有【最近一小时】才用当前
+                # lastPrice 换算——历史行用今天的价格去乘会得到错的价格口径，
+                # 所以在回灌场景一律留 0，由因子层 join kline close 重算。
+                recent = abs((now - ts).total_seconds()) <= 3600
+                px = self._last_price(raw_code) if recent else 0.0
                 out.append(
                     {
                         "venue": self.name,
                         "code": code,
                         "datetime": ts,
                         "sumOpenInterest": oi,
-                        "sumOpenInterestValue": 0.0,   # 接口不含 USD 口径，留 0 不臆造
+                        "sumOpenInterestValue": oi * px,
                         "ingested_at": now,
                     }
                 )

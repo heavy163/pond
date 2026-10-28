@@ -145,3 +145,40 @@ def test_select_instruments_exclude_base():
     got = spec.select_instruments(_rows())
     assert "WBTCUSDT" not in got and "AIXBT_USDT" not in got
     assert "BTCUSDT" in got
+
+
+# ---------------- 回灌计划：各所 OI 深度上限 ----------------
+
+
+def _runner():
+    from pond.cryptos.backfill import BackfillRunner
+    from pond.cryptos.config import CryptosConfig
+
+    cfg = CryptosConfig.load("configs/cryptos.yaml")
+    return BackfillRunner(store=None, config=cfg, execute=False)
+
+
+def test_backfill_caps_gate_oi_at_179_days():
+    """Gate 的 180 天是硬边界，必须留余量，否则 400。"""
+    runner = _runner()
+    _spec, targets = runner.plan("gate", ["oi"], 365)
+    assert "oi" in targets
+    days = (runner_now := __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc)) - targets["oi"][0]
+    assert 178 <= days.days <= 180, days
+
+
+def test_backfill_skips_venues_without_oi_history():
+    """OKX 只有当前值，请求回灌应被跳过而不是静默返回 0 行。"""
+    runner = _runner()
+    _spec, targets = runner.plan("okx", ["oi"], 30)
+    assert targets == {}
+
+
+def test_backfill_rate_is_halved():
+    """回灌必须降速，不能挤占实时配额。"""
+    runner = _runner()
+    spec, _ = runner.plan("gate", ["oi"], 30)
+    live = runner.config.get("gate")
+    for k, b in spec.buckets.items():
+        assert b.rate <= live.buckets[k].rate * 0.5 + 1e-9

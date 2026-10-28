@@ -69,7 +69,9 @@ class BitgetAdapter(VenueAdapter):
         end_ms = int(end.timestamp() * 1000)
         out: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        SPAN = 200 * HOUR_MS          # ★ 单页 200 根；按固定窗推进
         while cursor < end_ms:
+            page_end = min(cursor + SPAN, end_ms)
             d = await self.request(
                 f"{self.BASE}/mix/market/candles",
                 {
@@ -108,12 +110,7 @@ class BitgetAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
-            nxt = max(int(r[0]) for r in rows) + HOUR_MS
-            if nxt <= cursor:
-                break
-            cursor = nxt
-            if len(rows) < 200:
-                break
+            cursor = page_end
         return out
 
     async def funding(

@@ -92,6 +92,17 @@ COLUMNS: dict[str, list[str]] = {
         "duration_ms",
         "checked_at",
     ],
+    TABLE_BACKFILL: [
+        "venue",
+        "data_type",
+        "code",
+        "cursor_time",
+        "target_start",
+        "status",
+        "rows_total",
+        "err",
+        "updated_at",
+    ],
 }
 
 # 表 → 时间列（用于覆盖度查询与 FINAL 去重窗口）

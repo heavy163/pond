@@ -64,8 +64,24 @@ class GateAdapter(VenueAdapter):
     def resolve_code(self, raw_code: str) -> str:
         return raw_code.replace("_", "-")
 
-    def _multiplier(self, raw_code: str) -> float:
-        return self._mult.get(raw_code, 1.0)
+    async def _multiplier(self, raw_code: str) -> float:
+        """quanto_multiplier。
+
+        ★ 必须懒加载：回灌时 universe 来自 DB，不会调 instruments()，
+        缓存为空。此时退回默认 1.0 会让币数放大 100 倍（实测 AAVE 0.01→1.0，
+        428k 币被写成 42.8M 币），所以宁可抛错让该 symbol 失败。
+        """
+        if raw_code not in self._mult:
+            c = await self.request(
+                f"{self.BASE}/futures/usdt/contracts/{raw_code}",
+                endpoint="meta",
+                cost=1,
+            )
+            qm = (c or {}).get("quanto_multiplier")
+            if qm is None:
+                raise ValueError(f"gate {raw_code} 没有 quanto_multiplier，无法换算币本位")
+            self._mult[raw_code] = float(qm)
+        return self._mult[raw_code]
 
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
@@ -77,15 +93,17 @@ class GateAdapter(VenueAdapter):
         end_s = int(end.timestamp())
         out: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
-        mult = self._multiplier(raw_code)
+        mult = await self._multiplier(raw_code)
+        SPAN = 1000 * 3600          # ★ 单页上限 1000 根；必须按固定窗推进
         while cursor < end_s:
+            page_end = min(cursor + SPAN, end_s)
             rows = await self.request(
                 f"{self.BASE}/futures/usdt/candlesticks",
                 {
                     "contract": raw_code,
                     "interval": "1h",
                     "from": cursor,
-                    "to": end_s - 1,
+                    "to": page_end - 1,
                 },
                 endpoint="kline",
                 cost=2,
@@ -114,12 +132,7 @@ class GateAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
-            nxt = max(int(r["t"]) for r in rows) + HOUR_S
-            if nxt <= cursor:
-                break
-            cursor = nxt
-            if len(rows) < 1000:
-                break
+            cursor = page_end
         return out
 
     async def funding(
@@ -130,7 +143,9 @@ class GateAdapter(VenueAdapter):
         cursor = start_s
         end_s = int(end.timestamp())
         raw_rows: list[dict[str, Any]] = []
+        SPAN = 1000 * 8 * 3600      # 1000 条 × 8h
         while cursor < end_s:
+            page_end = min(cursor + SPAN, end_s)
             rows = await self.request(
                 f"{self.BASE}/futures/usdt/funding_rate",
                 {
@@ -145,12 +160,7 @@ class GateAdapter(VenueAdapter):
             if not rows:
                 break
             raw_rows.extend(rows)
-            nxt = max(int(r["t"]) for r in rows) + 1
-            if nxt <= cursor:
-                break
-            cursor = nxt
-            if len(rows) < 1000:
-                break
+            cursor = page_end
         if not raw_rows:
             return []
         times = sorted(int(r["t"]) for r in raw_rows)
@@ -175,19 +185,21 @@ class GateAdapter(VenueAdapter):
         self, raw_code: str, start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         code = self.resolve_code(raw_code)
-        mult = self._multiplier(raw_code)
+        mult = await self._multiplier(raw_code)
         cursor = int(start.timestamp())
         end_s = int(end.timestamp())
         out: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
+        SPAN = 1000 * 3600
         while cursor < end_s:
+            page_end = min(cursor + SPAN, end_s)
             rows = await self.request(
                 f"{self.BASE}/futures/usdt/contract_stats",
                 {
                     "contract": raw_code,
                     "interval": "1h",
                     "from": cursor,
-                    "to": end_s - 1,
+                    "to": page_end - 1,
                     "limit": 1000,
                 },
                 endpoint="oi",
@@ -199,22 +211,23 @@ class GateAdapter(VenueAdapter):
                 ts = snap_to_hour(to_utc(int(r["time"]) * 1000))
                 if ts < start or ts >= end:
                     continue
+                # 实测：open_interest 单位是【张】，open_interest_usd 是交易所自己算好的 U 口径。
+                # 优先用官方的 USD 字段，避免用 mark 自乘引入误差。
                 oi_base = float(r.get("open_interest") or 0) * mult
-                mark = float(r.get("mark_price") or 0)
+                usd = r.get("open_interest_usd")
+                if usd is not None:
+                    oi_usd = float(usd)
+                else:
+                    oi_usd = oi_base * float(r.get("mark_price") or 0)
                 out.append(
                     {
                         "venue": self.name,
                         "code": code,
                         "datetime": ts,
                         "sumOpenInterest": oi_base,
-                        "sumOpenInterestValue": oi_base * mark,
+                        "sumOpenInterestValue": oi_usd,
                         "ingested_at": now,
                     }
                 )
-            nxt = max(int(r["time"]) for r in rows) + HOUR_S
-            if nxt <= cursor:
-                break
-            cursor = nxt
-            if len(rows) < 1000:
-                break
+            cursor = page_end
         return out

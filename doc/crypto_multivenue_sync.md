@@ -1123,3 +1123,83 @@ Binance 关闭（生产库 `quant.kline_futures_1h` 已有其历史），其余 
 
 
 
+
+---
+
+## 16. 历史回灌（已落地）
+
+`pond/cryptos/backfill.py` + `scripts/backfill_cryptos.py`。
+
+```bash
+# 看计划（不写库）
+python scripts/backfill_cryptos.py --venue gate --data oi --days 179
+
+# 真写
+python scripts/backfill_cryptos.py --venue gate,bybit --data oi --execute
+
+# 只补主流币
+python scripts/backfill_cryptos.py --venue gate --data oi --symbols BTC,ETH,SOL --execute
+```
+
+### 16.1 实测结果
+
+| 交易所 | 数据 | 天数 | 合约 | 行数 | 耗时 | 错误 |
+|---|---|---|---|---|---|---|
+| **Gate** | OI | 179 | 30（27 有数据） | **92,971** | 100s | 0 |
+| **Bybit** | OI | 7 | 30 | **4,909** | 7.6s | 0 |
+
+Gate 每个合约 **4,296 行 = 179 × 24**，逐小时无缺口。7 天 Bybit 每码 168 行。
+
+单位换算逐值对齐（2026-10-27 12:00 UTC，AAVE-USDT）：
+
+```
+期望 coin=428,299.84  usd=56,783,992.79
+库内 coin=428,299.84  usd=56,783,992.79
+误差 coin=0.000000%   usd=0.000000%
+```
+
+隐含价格（USD/币）落在合理区间，说明 `open_interest(张) × quanto_multiplier` 的换算正确：
+
+| 合约 | min | median | max |
+|---|---|---|---|
+| AAVE-USDT | 58.52 | 95.26 | 185.93 |
+| AERO-USDT | 0.31 | 0.48 | 0.99 |
+| AGLD-USDT | 0.12 | 0.17 | 0.28 |
+
+OI 规模（USD）：AAVE 21–90M、AERO 2.5–34M、AGLD 0–1.3M —— 量级合理。
+
+### 16.2 回灌不覆盖实时的实证
+
+`ingested_at` 分权：回灌写 `bar时间 + 1s`，实时写 `now64(3)`。
+
+| venue | 回灌行 | 实时行 | 合计 |
+|---|---|---|---|
+| gate | 92,791 | 198 | 92,989 |
+| bybit | 822 | 198 | 1,020 |
+
+重叠的 18 行（3 个合约 × 6 小时）在 `count()` 里出现两次、`uniqExact` 里只有一次——
+这是 ReplacingMergeTree 尚未合并的正常现象，合并时按 `ingested_at` 取大，**实时值胜出**。
+
+### 16.3 回灌才暴露的三个 bug
+
+| # | Bug | 症状 | 修法 |
+|---|---|---|---|
+| 1 | 分页按"返回数据的最大时间戳"推进 | Gate 179 天只拿到 **50,763** 行（应 128,880），满页 1000 后直接跳到窗口末 | 改**固定时间窗**推进：`page_end = min(cursor + 1000h, end)`，不依赖返回数据 |
+| 2 | Gate 的 180 天是硬边界 | `from time exceeds 180-day limit` 400，30 个合约全挂 | 上限取 **179 天**，留时间余量 |
+| 3 | `quanto_multiplier` 缓存为空时默认 **1.0** | 回灌不调 `instruments()`，币数被放大 **100 倍**（AAVE 428k 币 → 42.8M 币） | 改懒加载：缺失时单查 `/contracts/{name}`，查不到**抛错**而不是兜底 |
+
+第 3 个最危险：它不报错、不影响 USD 口径（USD 用的是官方字段），只让**币数**错 100 倍。
+如果只看 USD 就发现不了。
+
+同一个"满页跳窗"问题在 Bybit/Bitget/KuCoin 的 K 线翻页里也存在（都是按返回数据推进），
+一并改成固定窗口。**这类 bug 只在回灌长窗才触发，实时 6 小时窗口永远碰不到。**
+
+### 16.4 Bybit 的 USD 口径
+
+Bybit 的 `open-interest` 接口只给币数，不给 USD。适配器的处理：
+
+- **最近 1 小时**：用一次 `tickers`（全市场，1 请求）取 `lastPrice` 换算
+- **历史行**：`sumOpenInterestValue = 0`
+
+不给历史行编造 USD 值——用今天的价格乘 7 天前的 OI 会得到错的价格口径。
+需要 USD 敞口时在因子层 `JOIN kline close` 重算，那里有真正的历史价格。
