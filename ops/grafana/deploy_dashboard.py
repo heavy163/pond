@@ -195,56 +195,6 @@ PANELS = [
         16, 23, 8, 7, ptype="stat",
         desc="全量行数。仅作总量参考，异常要靠上面几张按所/按小时的图。",
     ),
-    # ---------- 单所视图（变量切换）----------
-    panel(
-        12, "⑫ 单所各类数据量（$venue，近 3 天）",
-        """SELECT h AS time, dt, uniqExact(code) AS n FROM (
-             SELECT toStartOfHour(open_time) AS h, 'kline_fut' AS dt, code
-             FROM cryptos.kline_futures_1h
-             WHERE venue = ${venue:sqlstring} AND open_time >= now() - INTERVAL 3 DAY
-             UNION ALL
-             SELECT toStartOfHour(open_time), 'kline_spot', code
-             FROM cryptos.kline_spot_1h
-             WHERE venue = ${venue:sqlstring} AND open_time >= now() - INTERVAL 3 DAY
-             UNION ALL
-             SELECT toStartOfHour(datetime), 'oi', code
-             FROM cryptos.open_interest
-             WHERE venue = ${venue:sqlstring} AND datetime >= now() - INTERVAL 3 DAY
-             UNION ALL
-             SELECT toStartOfHour(datetime), 'funding', code
-             FROM cryptos.funding_rate
-             WHERE venue = ${venue:sqlstring} AND datetime >= now() - INTERVAL 3 DAY
-           ) GROUP BY h, dt ORDER BY h""",
-        0, 30, 16, 9, ptype="timeseries", fmt=1,
-        desc="单所 × 数据类型 × 时间。kline/oi 应≈该所码数；funding 是 8h 一次的稀疏序列。现货所（upbit）无 oi/funding 是正常。",
-    ),
-    panel(
-        13, "⑬ 单所状态（$venue）",
-        """SELECT
-             (SELECT anyLast(status) FROM cryptos.sync_stat
-               WHERE venue = ${venue:sqlstring}
-                 AND window_end = (SELECT max(window_end) FROM cryptos.sync_stat)) AS last_status,
-             (SELECT round(dateDiff('second', greatest(
-                        (SELECT max(open_time) FROM cryptos.kline_futures_1h WHERE venue = ${venue:sqlstring}),
-                        (SELECT max(open_time) FROM cryptos.kline_spot_1h    WHERE venue = ${venue:sqlstring})
-                      ), now()) / 3600, 2)) AS lag_h,
-             (SELECT uniqExact(code) FROM (
-                SELECT code FROM cryptos.kline_futures_1h
-                 WHERE venue = ${venue:sqlstring} AND open_time >= toStartOfHour(now()) - INTERVAL 3 HOUR
-                UNION ALL
-                SELECT code FROM cryptos.kline_spot_1h
-                 WHERE venue = ${venue:sqlstring} AND open_time >= toStartOfHour(now()) - INTERVAL 3 HOUR
-             )) AS codes_3h,
-             (SELECT uniqExact(open_time, code) FROM (
-                SELECT open_time, code FROM cryptos.kline_futures_1h
-                 WHERE venue = ${venue:sqlstring} AND open_time >= now() - INTERVAL 24 HOUR
-                UNION ALL
-                SELECT open_time, code FROM cryptos.kline_spot_1h
-                 WHERE venue = ${venue:sqlstring} AND open_time >= now() - INTERVAL 24 HOUR
-             )) AS bars_24h""",
-        16, 30, 8, 9,
-        desc="选中交易所的当前状态（现货所自动走 spot 表）。lag_h 健康值 1~2h。",
-    ),
 ]
 
 
@@ -253,11 +203,10 @@ PANELS = [
 LAYOUT = {
     1: (0, 1),   2: (12, 1),  3: (18, 1),
     4: (0, 9),   5: (8, 9),   6: (18, 9),
-    12: (0, 17), 13: (16, 17),
-    7: (0, 27),  8: (12, 27),
-    9: (0, 35), 10: (8, 35), 11: (16, 35),
+    7: (0, 17),  8: (12, 17),
+    9: (0, 25), 10: (8, 25), 11: (16, 25),
 }
-ROWS = [(0, "一、全所状态与健康"), (16, "二、单所视图（顶部下拉切换交易所）"), (26, "三、全所数据量")]
+ROWS = [(0, "一、全所状态与健康"), (16, "二、全所数据量")]
 
 for _p in PANELS:
     if _p["id"] in LAYOUT:
@@ -288,21 +237,6 @@ dashboard = {
     "time": {"from": "now-24h", "to": "now"},
     "timepicker": {"refresh_intervals": ["1m", "5m", "15m", "1h"]},
     "panels": PANELS,
-    "templating": {
-        "list": [{
-            "name": "venue",
-            "label": "交易所",
-            "type": "query",
-            "datasource": {"type": "grafana-clickhouse-datasource", "uid": DS_UID},
-            "query": "SELECT DISTINCT venue FROM cryptos.sync_stat ORDER BY venue",
-            "definition": "SELECT DISTINCT venue FROM cryptos.sync_stat ORDER BY venue",
-            "refresh": 1,
-            "sort": 1,
-            "multi": False,
-            "includeAll": False,
-            "current": {"selected": True, "text": "okx", "value": "okx"},
-        }]
-    },
 }
 
 # 独立文件夹：与既有看板（FundETF/FutureData/...）分开，作为一个新的入口
@@ -327,5 +261,5 @@ titles = [p["title"] for p in back["panels"]]
 print("[verify] panels:", len(titles))
 for t in titles:
     print("  -", t)
-assert len(titles) == 16, titles  # 13 面板 + 3 个分区行
+assert len(titles) == 13, titles  # 11 面板 + 2 个分区行
 print("✅ 看板已部署并回读确认")

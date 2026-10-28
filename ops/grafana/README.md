@@ -5,9 +5,10 @@
 
 ## 交付物
 
-| 入口 | 地址 |
-|---|---|
-| 看板 | `http://192.168.1.4:3000/d/cryptos-monitor` |
+| 入口 | 地址 | 内容 |
+|---|---|---|
+| **全所监控** | `http://192.168.1.4:3000/d/cryptos-monitor` | 11 面板，全部全所口径（状态/健康/数据量） |
+| **单所数据量** | `http://192.168.1.4:3000/d/cryptos-venue-volume` | 4 类数据各一块独立图 + 顶部下拉切换交易所 |
 | 文件夹 | `Cryptos`（uid `cg2kk23urwdmob`） |
 | 告警规则 | Alerting → Alert rules → folder `Cryptos`（组 `cryptos-sync`，9 条） |
 
@@ -19,6 +20,7 @@
 ```bash
 cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
 /usr/bin/python3.12 ops/grafana/deploy_dashboard.py   # 6 个面板（幂等，按 uid 覆盖）
+/usr/bin/python3.12 ops/grafana/deploy_venue_dashboard.py  # 单所数据量看板（5 面板）
 /usr/bin/python3.12 ops/grafana/deploy_alerts.py      # 9 条规则（幂等，按 title upsert）
 /usr/bin/python3.12 ops/grafana/deploy_alerts.py --only 3   # 只动第 3 条
 ```
@@ -26,7 +28,21 @@ cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
 凭证：`~/.hermes/secrets/grafana_token`（Grafana service account token，600 权限，**不入库**）。
 可用环境变量 `GRAFANA_URL` / `GRAFANA_TOKEN_FILE` 覆盖。
 
-## 看板面板（13 个）
+## 单所数据量看板（独立看板）
+
+`http://192.168.1.4:3000/d/cryptos-venue-volume`，顶部「交易所」下拉（9 个），时间窗 3 天。
+
+| # | 面板 | 表 | 说明 |
+|---|---|---|---|
+| ① | 合约 K 线 每小时根数 | `kline_futures_1h` | 应≈该所合约码数；掉到 0/砍半=采集失败 |
+| ② | 现货 K 线 每小时根数 | `kline_spot_1h` | 只有 upbit 有数据 |
+| ③ | 持仓量 OI 每小时条数 | `open_interest` | 快照型；断档=永久丢失 |
+| ④ | 资金费率 每小时条数 | `funding_rate` | 8h 结算，多数小时为 0 属正常 |
+| ⑤ | 四类 24h 汇总 | 四表 | 去重后逻辑行数 |
+
+实测：okx → ①739 ③322 ④102 ②0；upbit → ②644 其余 0。合约所无现货、现货所无合约均属正常。
+
+## 全所监控看板面板（11 个）
 
 **版面：三个分区（标题栏可直接折叠）**
 
@@ -59,18 +75,7 @@ cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
 | ⑩ | OI 每小时采集条数 | OI 是快照，断档即永久丢失（6 家所无历史可补） |
 | ⑪ | 累计数据量（全库） | 总量参考 |
 
-**分区二：单所视图（靠顶部变量 `交易所` 切换）**
 
-| # | 面板 | 用途 |
-|---|---|---|
-| ⑫ | 单所各类数据量（$venue，近 3 天） | 单所 × {kline_fut, kline_spot, oi, funding} × 时间。kline/oi 应≈该所码数；funding 是 8h 一次的稀疏序列；现货所无 oi/funding 属正常 |
-| ⑬ | 单所状态（$venue） | 该所选中的 status / 滞后小时 / 近 3h 码数 / 24h bar 数 |
-
-变量 `venue` 由 `SELECT DISTINCT venue FROM cryptos.sync_stat` 填充（当前 9 个：bitget/bybit/gate/htx/
-hyperliquid/kucoin/mexc/okx/upbit）。**上半区 11 个面板不引用该变量**，始终保持全所口径。
-
-⑬ 的滞后时间跨 `kline_futures_1h` 与 `kline_spot_1h` 取 `greatest(max(open_time))`：
-纯现货所（upbit）没有合约表，只查 futures 会算出 1970 年 → 滞后 498105 小时。
 
 面板口径统一用 `uniqExact(...)` 而不是 `count()`：ReplacingMergeTree 在后台合并完成前会有重复版本，
 `count()` 会把同一根 bar 数多次（历史上 `n_actual` 曾算出 27/24 > 100%）。
