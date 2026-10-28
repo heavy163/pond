@@ -38,6 +38,7 @@ def parse_args():
     p.add_argument("--no-repair", action="store_true", help="只检测不修复")
     p.add_argument("--execute", action="store_true", help="写库（修复数据 + coverage 台账）")
     p.add_argument("--config", default=None)
+    p.add_argument("--no-coverage", action="store_true", help="只修复，不写 coverage 台账（给每小时调用）")
     p.add_argument("--strict", action="store_true", help="有永久丢失缺口时返回 1（默认只告警）")
     p.add_argument("--json", action="store_true")
     return p.parse_args()
@@ -100,8 +101,11 @@ def main() -> int:
                 print(f"  ! {e}")
             if rep.failed:
                 rc = 2
-        n = det.write_coverage(gaps, venues, args.days)
-        print(f"coverage 台账写入 {n} 行")
+        if args.no_coverage:
+            print("（--no-coverage：跳过台账，台账由每日 00:20 写）")
+        else:
+            n = det.write_coverage(gaps, venues, args.days)
+            print(f"coverage 台账写入 {n} 行")
     else:
         print("\n（dry-run：加 --execute 才会修复并写 coverage 台账）")
 

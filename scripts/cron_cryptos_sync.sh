@@ -23,6 +23,13 @@ ts_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 /usr/bin/python3.12 scripts/sync_cryptos.py --execute "$@" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 
+# 同步后再查一次缺口（只修复不写台账）：停机后 1 小时内补回，而不是等次日 00:20
+if [ "$rc" -eq 0 ]; then
+    /usr/bin/python3.12 scripts/check_gaps.py --days 2 --execute --no-coverage 2>&1 | tee -a "$LOG"
+    gap_rc=${PIPESTATUS[0]}
+    [ "$gap_rc" -ne 0 ] && echo "[gapcheck] exit=${gap_rc}" >> "$LOG"
+fi
+
 echo "[${ts_start}] exit=${rc}" >> "$LOG"
 
 # 滚动截断：只在超过 2*KEEP 行时裁一次，避免每轮都重写整个文件
