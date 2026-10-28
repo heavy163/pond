@@ -49,13 +49,14 @@ ORDER BY (venue, code)
 """
 
 # 币安没有、但各所确实在挂的传统标的别名（人工核对过的）
+# 只放「名字本身就是唯一含义」的别名。带 500/100/US30 后缀的指数名不会和币撞车；
+# 裸 SPX / DIA 会（SPX6900 meme 币、DIA 预言机币），所以不放这里，留给 COLLISIONS。
 ALIASES: dict[str, tuple[str, str]] = {
     "XAU": ("commodity", "XAU"), "XAG": ("commodity", "XAG"),
     "XAUT": ("commodity", "XAU"), "PAXG": ("commodity", "XAU"),
-    "SPX": ("index", "SPX"), "SPX500": ("index", "SPX"),
-    "NDX": ("index", "NDX"), "NDX100": ("index", "NDX"),
-    "NAS100": ("index", "NDX"), "US30": ("index", "DJI"),
-    "DIA": ("index", "DJI"), "US500": ("index", "SPX"),
+    "SPX500": ("index", "SPX"), "US500": ("index", "SPX"),
+    "NDX100": ("index", "NDX"), "NAS100": ("index", "NDX"),
+    "US30": ("index", "DJI"),
 }
 
 # 代号撞车：同一个 ticker 既是币又是传统标的，光看名字判不出来。
@@ -111,15 +112,15 @@ def classify(base: str, tradfi: dict[str, str], coins: set[str]) -> tuple[str, s
     if b.startswith("PRE"):                            # 1. pre-IPO
         return "premarket", b[3:], "venue_suffix"
 
-    if n in tradfi and n not in COLLISIONS:            # 2. 币安权威映射
+    if b in ALIASES:                                   # 2. 无歧义别名（SPX500/NAS100/XAUT…）
+        cls, und = ALIASES[b]
+        return cls, und, "heuristic"
+    if n in tradfi and n not in COLLISIONS:            # 3. 币安权威映射
         if n in coins:                                # 币安自己既当币又当传统标的
             return "ambiguous", n, "collision"
         return tradfi[n], n, "binance"
-    if n in COLLISIONS and (n in coins or n in tradfi):  # 3. 撞车
+    if n in COLLISIONS and (n in coins or n in tradfi):  # 4. 撞车
         return "ambiguous", n, "collision"
-    if b in ALIASES or n in ALIASES:                   # 4. 人工别名
-        cls, und = ALIASES.get(b) or ALIASES[n]
-        return cls, und, "heuristic"
     return "crypto", b, "default"
 
 

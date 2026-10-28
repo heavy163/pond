@@ -1,0 +1,1122 @@
+{
+  "generated_at": "2026-10-28T15:29:19+00:00",
+  "binance": {
+    "total_symbols": 936,
+    "contract_type": {
+      "PERPETUAL": 703,
+      "TRADIFI_PERPETUAL": 229,
+      "CURRENT_QUARTER": 2,
+      "NEXT_QUARTER": 2
+    },
+    "underlying_type": {
+      "COIN": 703,
+      "INDEX": 3,
+      "COMMODITY": 8,
+      "EQUITY": 191,
+      "PREMARKET": 5,
+      "KR_EQUITY": 8,
+      "HK_EQUITY": 15,
+      "CN_EQUITY": 2,
+      "FX": 1
+    },
+    "tradifi_underlyings": 232,
+    "tradifi_breakdown": {
+      "index": 3,
+      "commodity": 8,
+      "equity": 190,
+      "premarket": 5,
+      "kr_equity": 8,
+      "hk_equity": 15,
+      "cn_equity": 2,
+      "fx": 1
+    },
+    "collision_cases": {
+      "DIA": {
+        "underlying_type": "coin",
+        "symbol": "DIAUSDT"
+      },
+      "SPX": {
+        "underlying_type": "coin",
+        "symbol": "SPXUSDT"
+      },
+      "ALL": {
+        "underlying_type": "index",
+        "symbol": "ALLUSDT",
+        "contract_type": "PERPETUAL"
+      },
+      "META": {
+        "underlying_type": "equity",
+        "symbol": "METAUSDT",
+        "contract_type": "TRADIFI_PERPETUAL"
+      }
+    }
+  },
+  "ours": {
+    "instrument_class_rows": 12658,
+    "matched_via": {
+      "default": 10612,
+      "binance": 1223,
+      "venue_suffix": 452,
+      "heuristic": 36,
+      "collision": 36,
+      "venue_crypto_only": 299
+    },
+    "by_venue_type": [
+      {
+        "venue": "bitget",
+        "market": "perp",
+        "total": 867,
+        "crypto": 641,
+        "equity": 187,
+        "hk_equity": 8,
+        "kr_equity": 7,
+        "cn_equity": 2,
+        "premarket": 4,
+        "commodity": 10,
+        "index": 1,
+        "fx": 1,
+        "ambiguous": 6,
+        "tradfi": 220,
+        "tradfi_pct": 25.4
+      },
+      {
+        "venue": "bitget",
+        "market": "spot",
+        "total": 3519,
+        "crypto": 3514,
+        "equity": 1,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 2,
+        "commodity": 2,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 0,
+        "tradfi": 5,
+        "tradfi_pct": 0.1
+      },
+      {
+        "venue": "bybit",
+        "market": "perp",
+        "total": 813,
+        "crypto": 595,
+        "equity": 186,
+        "hk_equity": 10,
+        "kr_equity": 8,
+        "cn_equity": 2,
+        "premarket": 0,
+        "commodity": 6,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 6,
+        "tradfi": 212,
+        "tradfi_pct": 26.1
+      },
+      {
+        "venue": "bybit",
+        "market": "spot",
+        "total": 388,
+        "crypto": 385,
+        "equity": 1,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 1,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 1,
+        "tradfi": 2,
+        "tradfi_pct": 0.5
+      },
+      {
+        "venue": "gate",
+        "market": "perp",
+        "total": 1066,
+        "crypto": 843,
+        "equity": 179,
+        "hk_equity": 11,
+        "kr_equity": 8,
+        "cn_equity": 2,
+        "premarket": 5,
+        "commodity": 8,
+        "index": 3,
+        "fx": 1,
+        "ambiguous": 6,
+        "tradfi": 217,
+        "tradfi_pct": 20.4
+      },
+      {
+        "venue": "gate",
+        "market": "spot",
+        "total": 2033,
+        "crypto": 2025,
+        "equity": 3,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 1,
+        "commodity": 2,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 2,
+        "tradfi": 6,
+        "tradfi_pct": 0.3
+      },
+      {
+        "venue": "htx",
+        "market": "perp",
+        "total": 397,
+        "crypto": 176,
+        "equity": 181,
+        "hk_equity": 14,
+        "kr_equity": 8,
+        "cn_equity": 2,
+        "premarket": 4,
+        "commodity": 8,
+        "index": 1,
+        "fx": 1,
+        "ambiguous": 2,
+        "tradfi": 219,
+        "tradfi_pct": 55.2
+      },
+      {
+        "venue": "htx",
+        "market": "spot",
+        "total": 580,
+        "crypto": 575,
+        "equity": 3,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 1,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 1,
+        "tradfi": 4,
+        "tradfi_pct": 0.7
+      },
+      {
+        "venue": "hyperliquid",
+        "market": "perp",
+        "total": 179,
+        "crypto": 177,
+        "equity": 0,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 1,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 1,
+        "tradfi": 1,
+        "tradfi_pct": 0.6
+      },
+      {
+        "venue": "kucoin",
+        "market": "perp",
+        "total": 702,
+        "crypto": 525,
+        "equity": 142,
+        "hk_equity": 11,
+        "kr_equity": 5,
+        "cn_equity": 0,
+        "premarket": 5,
+        "commodity": 9,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 5,
+        "tradfi": 172,
+        "tradfi_pct": 24.5
+      },
+      {
+        "venue": "kucoin",
+        "market": "spot",
+        "total": 815,
+        "crypto": 805,
+        "equity": 5,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 2,
+        "index": 1,
+        "fx": 0,
+        "ambiguous": 2,
+        "tradfi": 8,
+        "tradfi_pct": 1.0
+      },
+      {
+        "venue": "mexc",
+        "market": "perp",
+        "total": 1085,
+        "crypto": 612,
+        "equity": 450,
+        "hk_equity": 5,
+        "kr_equity": 2,
+        "cn_equity": 1,
+        "premarket": 3,
+        "commodity": 6,
+        "index": 3,
+        "fx": 0,
+        "ambiguous": 3,
+        "tradfi": 470,
+        "tradfi_pct": 43.3
+      },
+      {
+        "venue": "mexc",
+        "market": "spot",
+        "total": 1390,
+        "crypto": 1381,
+        "equity": 7,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 0,
+        "index": 1,
+        "fx": 0,
+        "ambiguous": 1,
+        "tradfi": 8,
+        "tradfi_pct": 0.6
+      },
+      {
+        "venue": "okx",
+        "market": "perp",
+        "total": 511,
+        "crypto": 327,
+        "equity": 154,
+        "hk_equity": 6,
+        "kr_equity": 6,
+        "cn_equity": 2,
+        "premarket": 4,
+        "commodity": 6,
+        "index": 1,
+        "fx": 0,
+        "ambiguous": 5,
+        "tradfi": 179,
+        "tradfi_pct": 35.0
+      },
+      {
+        "venue": "okx",
+        "market": "spot",
+        "total": 468,
+        "crypto": 465,
+        "equity": 1,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 2,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 0,
+        "tradfi": 3,
+        "tradfi_pct": 0.6
+      },
+      {
+        "venue": "upbit",
+        "market": "spot",
+        "total": 299,
+        "crypto": 299,
+        "equity": 0,
+        "hk_equity": 0,
+        "kr_equity": 0,
+        "cn_equity": 0,
+        "premarket": 0,
+        "commodity": 0,
+        "index": 0,
+        "fx": 0,
+        "ambiguous": 0,
+        "tradfi": 0,
+        "tradfi_pct": 0.0
+      }
+    ],
+    "perp_category": {
+      "htx": {
+        "equity": 181,
+        "index": 1,
+        "hk_equity": 14,
+        "cn_equity": 2,
+        "fx": 1,
+        "commodity": 8,
+        "premarket": 4,
+        "kr_equity": 8
+      },
+      "hyperliquid": {
+        "commodity": 1
+      },
+      "kucoin": {
+        "equity": 142,
+        "premarket": 5,
+        "hk_equity": 11,
+        "commodity": 9,
+        "kr_equity": 5
+      },
+      "mexc": {
+        "equity": 450,
+        "premarket": 3,
+        "commodity": 6,
+        "hk_equity": 5,
+        "kr_equity": 2,
+        "index": 3,
+        "cn_equity": 1
+      },
+      "okx": {
+        "equity": 154,
+        "premarket": 4,
+        "commodity": 6,
+        "hk_equity": 6,
+        "cn_equity": 2,
+        "kr_equity": 6,
+        "index": 1
+      },
+      "bitget": {
+        "equity": 187,
+        "premarket": 4,
+        "hk_equity": 8,
+        "commodity": 10,
+        "cn_equity": 2,
+        "kr_equity": 7,
+        "index": 1,
+        "fx": 1
+      },
+      "bybit": {
+        "equity": 186,
+        "hk_equity": 10,
+        "commodity": 6,
+        "cn_equity": 2,
+        "kr_equity": 8
+      },
+      "gate": {
+        "equity": 179,
+        "premarket": 5,
+        "hk_equity": 11,
+        "commodity": 8,
+        "cn_equity": 2,
+        "kr_equity": 8,
+        "index": 3,
+        "fx": 1
+      }
+    },
+    "ambiguous": [
+      {
+        "venue": "hyperliquid",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "COIN-USDT",
+        "underlying": "COIN",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "kucoin",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "MSTR-USDT",
+        "underlying": "MSTR",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "kucoin",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "mexc",
+        "code": "ALL-USDT",
+        "underlying": "ALL",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "mexc",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "mexc",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "mexc",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "okx",
+        "code": "COIN-USDT",
+        "underlying": "COIN",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "okx",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "okx",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "okx",
+        "code": "MSTR-USDT",
+        "underlying": "MSTR",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "okx",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "COIN-USDT",
+        "underlying": "COIN",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "MSTR-USDT",
+        "underlying": "MSTR",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bitget",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "COIN-USDT",
+        "underlying": "COIN",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "MSTR-USDT",
+        "underlying": "MSTR",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "bybit",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "gate",
+        "code": "COIN-USDT",
+        "underlying": "COIN",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "gate",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "MSTR-USDT",
+        "underlying": "MSTR",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "gate",
+        "code": "SPX-USDT",
+        "underlying": "SPX",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "htx",
+        "code": "DIA-USDT",
+        "underlying": "DIA",
+        "matched_via": "collision",
+        "market": "spot"
+      },
+      {
+        "venue": "htx",
+        "code": "MARA-USDT",
+        "underlying": "MARA",
+        "matched_via": "collision",
+        "market": "perp"
+      },
+      {
+        "venue": "htx",
+        "code": "META-USDT",
+        "underlying": "META",
+        "matched_via": "collision",
+        "market": "perp"
+      }
+    ],
+    "cross_venue": {
+      "AAPL": {
+        "kucoin": "AAPL-USDT",
+        "mexc": "AAPLSTOCK-USDT",
+        "okx": "AAPL-USDT",
+        "bitget": "AAPL-USDT",
+        "bybit": "AAPL-USDT",
+        "gate": "AAPL-USDT",
+        "htx": "AAPL-USDT"
+      },
+      "NVDA": {
+        "kucoin": "NVDA-USDT",
+        "okx": "NVDA-USDT",
+        "bitget": "NVDA-USDT",
+        "bybit": "NVDA-USDT",
+        "gate": "NVDA-USDT",
+        "htx": "NVDA-USDT"
+      },
+      "TSLA": {
+        "kucoin": "TSLA-USDT",
+        "okx": "TSLA-USDT",
+        "bitget": "TSLA-USDT",
+        "bybit": "TSLA-USDT",
+        "gate": "TSLA-USDT"
+      },
+      "XAU": {
+        "htx": "XAU-USDT",
+        "hyperliquid": "PAXG-USDT",
+        "kucoin": "PAXG-USDT",
+        "mexc": "PAXG-USDT",
+        "okx": "PAXG-USDT",
+        "bitget": "PAXG-USDT",
+        "bybit": "PAXG-USDT",
+        "gate": "PAXG-USDT"
+      },
+      "SPX500": {},
+      "OPENAI": {
+        "kucoin": "OPENAI-USDT",
+        "mexc": "OPENAI-USDT",
+        "okx": "OPENAI-USDT",
+        "bitget": "OPENAI-USDT",
+        "gate": "OPENAI-USDT",
+        "htx": "OPENAI-USDT"
+      }
+    }
+  },
+  "examples": {
+    "htx/perp/equity": [
+      "SKUU-USDT",
+      "SMCI-USDT",
+      "SMH-USDT",
+      "SNDK-USDT"
+    ],
+    "htx/perp/index": [
+      "SPX500-USDT"
+    ],
+    "htx/perp/hk_equity": [
+      "TENCENT-USDT",
+      "ZHIPU-USDT",
+      "ZHONGJI-USDT",
+      "BYD-USDT"
+    ],
+    "htx/perp/cn_equity": [
+      "UNITREE-USDT",
+      "CXMT-USDT"
+    ],
+    "htx/perp/fx": [
+      "USDBRL-USDT"
+    ],
+    "htx/perp/commodity": [
+      "XAG-USDT",
+      "XAU-USDT",
+      "XAUT-USDT",
+      "XPD-USDT"
+    ],
+    "htx/spot/commodity": [
+      "XAUT-USDT"
+    ],
+    "hyperliquid/perp/commodity": [
+      "PAXG-USDT"
+    ],
+    "hyperliquid/perp/ambiguous": [
+      "SPX-USDT"
+    ],
+    "kucoin/spot/equity": [
+      "4STOCK-USDT",
+      "ACN-USDT",
+      "BNC-USDT",
+      "CAT-USDT"
+    ],
+    "kucoin/perp/equity": [
+      "AAOI-USDT",
+      "AAPL-USDT",
+      "ADBE-USDT",
+      "AGPU-USDT"
+    ],
+    "kucoin/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "MOONSHOT-USDT",
+      "OPENAI-USDT",
+      "OURA-USDT"
+    ],
+    "kucoin/perp/hk_equity": [
+      "BYD-USDT",
+      "CSOPSAMSUNG2L-USDT",
+      "CSOPSKHYNIX2L-USDT",
+      "GIGADEV-USDT"
+    ],
+    "kucoin/perp/commodity": [
+      "BZ-USDT",
+      "CL-USDT",
+      "COPPER-USDT",
+      "NATGAS-USDT"
+    ],
+    "kucoin/perp/ambiguous": [
+      "COIN-USDT",
+      "MARA-USDT",
+      "META-USDT",
+      "MSTR-USDT"
+    ],
+    "kucoin/spot/index": [
+      "DEFI-USDT"
+    ],
+    "kucoin/spot/ambiguous": [
+      "DIA-USDT",
+      "SPX-USDT"
+    ],
+    "kucoin/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "SAMSUNG-USDT",
+      "SAMSUNGEM-USDT"
+    ],
+    "kucoin/spot/commodity": [
+      "PAXG-USDT",
+      "XAUT-USDT"
+    ],
+    "mexc/perp/equity": [
+      "4STOCK-USDT",
+      "AALSTOCK-USDT",
+      "AAOISTOCK-USDT",
+      "AAPLSTOCK-USDT"
+    ],
+    "mexc/spot/equity": [
+      "4STOCK-USDT",
+      "ACN-USDT",
+      "CAT-USDT",
+      "EWT-USDT"
+    ],
+    "mexc/perp/ambiguous": [
+      "ALL-USDT",
+      "DIA-USDT",
+      "SPX-USDT"
+    ],
+    "mexc/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "OPENAI-USDT",
+      "PREDICT-USDT"
+    ],
+    "mexc/perp/commodity": [
+      "COPPER-USDT",
+      "PAXG-USDT",
+      "XAU-USDT",
+      "XAUT-USDT"
+    ],
+    "mexc/perp/hk_equity": [
+      "CSOPSAMSUNG2L-USDT",
+      "CSOPSKHYNIX2L-USDT",
+      "HK0700-USDT",
+      "HK0992-USDT"
+    ],
+    "mexc/spot/index": [
+      "DEFI-USDT"
+    ],
+    "mexc/perp/kr_equity": [
+      "KODEX200-USDT",
+      "LGELECTRONICS-USDT"
+    ],
+    "mexc/perp/index": [
+      "NAS100-USDT",
+      "SPX500-USDT",
+      "US30-USDT"
+    ],
+    "mexc/spot/ambiguous": [
+      "SPX-USDT"
+    ],
+    "mexc/perp/cn_equity": [
+      "UNITREE-USDT"
+    ],
+    "okx/perp/equity": [
+      "AAOI-USDT",
+      "AAPL-USDT",
+      "ABBV-USDT",
+      "ACN-USDT"
+    ],
+    "okx/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "MOONSHOT-USDT",
+      "OPENAI-USDT",
+      "OURA-USDT"
+    ],
+    "okx/perp/commodity": [
+      "BZ-USDT",
+      "CL-USDT",
+      "XAG-USDT",
+      "XAU-USDT"
+    ],
+    "okx/spot/equity": [
+      "CAT-USDT"
+    ],
+    "okx/perp/ambiguous": [
+      "COIN-USDT",
+      "MARA-USDT",
+      "META-USDT",
+      "MSTR-USDT"
+    ],
+    "okx/perp/hk_equity": [
+      "CSOPSAMSUNG2L-USDT",
+      "CSOPSKHYNIX2L-USDT",
+      "MINIMAX-USDT",
+      "POPMART-USDT"
+    ],
+    "okx/perp/cn_equity": [
+      "CXMT-USDT",
+      "UNITREE-USDT"
+    ],
+    "okx/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "LGELECTRONICS-USDT",
+      "NAVER-USDT"
+    ],
+    "okx/spot/commodity": [
+      "PAXG-USDT",
+      "XAUT-USDT"
+    ],
+    "okx/perp/index": [
+      "US500-USDT"
+    ],
+    "bitget/perp/equity": [
+      "AAOI-USDT",
+      "AAPL-USDT",
+      "ABBV-USDT",
+      "ACNSTOCK-USDT"
+    ],
+    "bitget/spot/equity": [
+      "ACN-USDT"
+    ],
+    "bitget/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "MOONSHOT-USDT",
+      "OPENAI-USDT",
+      "OURA-USDT"
+    ],
+    "bitget/perp/hk_equity": [
+      "BYD-USDT",
+      "KUAISHOU-USDT",
+      "MEITUAN-USDT",
+      "MINIMAX-USDT"
+    ],
+    "bitget/perp/commodity": [
+      "BZ-USDT",
+      "CL-USDT",
+      "COPPER-USDT",
+      "NATGAS-USDT"
+    ],
+    "bitget/perp/ambiguous": [
+      "COIN-USDT",
+      "DIA-USDT",
+      "MARA-USDT",
+      "META-USDT"
+    ],
+    "bitget/perp/cn_equity": [
+      "CXMT-USDT",
+      "UNITREE-USDT"
+    ],
+    "bitget/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "LGELECTRONICS-USDT",
+      "NAVER-USDT"
+    ],
+    "bitget/perp/index": [
+      "NDX100-USDT"
+    ],
+    "bitget/spot/commodity": [
+      "PAXG-USDT",
+      "XAUT-USDT"
+    ],
+    "bitget/perp/fx": [
+      "USDBRL-USDT"
+    ],
+    "bitget/spot/premarket": [
+      "preOPAI-USDT",
+      "preSPCX-USDT"
+    ],
+    "bybit/perp/equity": [
+      "4STOCK-USDT",
+      "AAOI-USDT",
+      "AAPL-USDT",
+      "ABBV-USDT"
+    ],
+    "bybit/perp/hk_equity": [
+      "BYD-USDT",
+      "CSOPSAMSUNG2L-USDT",
+      "CSOPSKHYNIX2L-USDT",
+      "KUAISHOU-USDT"
+    ],
+    "bybit/perp/commodity": [
+      "BZ-USDT",
+      "CL-USDT",
+      "PAXG-USDT",
+      "XAG-USDT"
+    ],
+    "bybit/spot/equity": [
+      "CAT-USDT"
+    ],
+    "bybit/perp/ambiguous": [
+      "COIN-USDT",
+      "DIA-USDT",
+      "MARA-USDT",
+      "META-USDT"
+    ],
+    "bybit/perp/cn_equity": [
+      "CXMT-USDT",
+      "UNITREE-USDT"
+    ],
+    "bybit/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "KODEX200-USDT",
+      "LGELECTRONICS-USDT"
+    ],
+    "bybit/spot/ambiguous": [
+      "SPX-USDT"
+    ],
+    "bybit/spot/commodity": [
+      "XAUT-USDT"
+    ],
+    "gate/perp/equity": [
+      "4STOCK-USDT",
+      "AAOI-USDT",
+      "AAPL-USDT",
+      "ABBV-USDT"
+    ],
+    "gate/spot/equity": [
+      "4STOCK-USDT",
+      "BNC-USDT",
+      "SPCX-USDT"
+    ],
+    "gate/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "MOONSHOT-USDT",
+      "OPENAI-USDT",
+      "OURA-USDT"
+    ],
+    "gate/perp/hk_equity": [
+      "BYD-USDT",
+      "CSOPSAMSUNG2L-USDT",
+      "CSOPSKHYNIX2L-USDT",
+      "GIGADEV-USDT"
+    ],
+    "gate/perp/commodity": [
+      "BZ-USDT",
+      "CL-USDT",
+      "PAXG-USDT",
+      "XAG-USDT"
+    ],
+    "gate/perp/ambiguous": [
+      "COIN-USDT",
+      "DIA-USDT",
+      "MARA-USDT",
+      "META-USDT"
+    ],
+    "gate/perp/cn_equity": [
+      "CXMT-USDT",
+      "UNITREE-USDT"
+    ],
+    "gate/spot/ambiguous": [
+      "DIA-USDT",
+      "SPX-USDT"
+    ],
+    "gate/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "KODEX200-USDT",
+      "LGELECTRONICS-USDT"
+    ],
+    "gate/perp/index": [
+      "NAS100-USDT",
+      "SPX500-USDT",
+      "US30-USDT"
+    ],
+    "gate/spot/premarket": [
+      "OPENAI-USDT"
+    ],
+    "gate/spot/commodity": [
+      "PAXG-USDT",
+      "XAUT-USDT"
+    ],
+    "gate/perp/fx": [
+      "USDBRL-USDT"
+    ],
+    "htx/spot/equity": [
+      "4STOCK-USDT",
+      "ACN-USDT",
+      "CAT-USDT"
+    ],
+    "htx/perp/premarket": [
+      "ANTHROPIC-USDT",
+      "MOONSHOT-USDT",
+      "OPENAI-USDT",
+      "OURA-USDT"
+    ],
+    "htx/spot/ambiguous": [
+      "DIA-USDT"
+    ],
+    "htx/perp/kr_equity": [
+      "HANMI-USDT",
+      "HYUNDAI-USDT",
+      "KODEX200-USDT",
+      "LGELECTRONICS-USDT"
+    ],
+    "htx/perp/ambiguous": [
+      "MARA-USDT",
+      "META-USDT"
+    ]
+  }
+}
