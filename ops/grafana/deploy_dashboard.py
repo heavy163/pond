@@ -247,6 +247,32 @@ PANELS = [
     ),
 ]
 
+
+# ---------------- 版面重排 ----------------
+# 单所视图挪到第二屏（原来在 y=30，即第 3 屏，用户反馈找不到）
+LAYOUT = {
+    1: (0, 1),   2: (12, 1),  3: (18, 1),
+    4: (0, 9),   5: (8, 9),   6: (18, 9),
+    12: (0, 17), 13: (16, 17),
+    7: (0, 27),  8: (12, 27),
+    9: (0, 35), 10: (8, 35), 11: (16, 35),
+}
+ROWS = [(0, "一、全所状态与健康"), (16, "二、单所视图（顶部下拉切换交易所）"), (26, "三、全所数据量")]
+
+for _p in PANELS:
+    if _p["id"] in LAYOUT:
+        _p["gridPos"]["x"], _p["gridPos"]["y"] = LAYOUT[_p["id"]]
+
+ROW_PANELS = [{
+    "id": 100 + i, "type": "row", "title": title, "collapsed": False,
+    "gridPos": {"x": 0, "y": y, "w": 24, "h": 1},
+    "panels": [],
+} for i, (y, title) in enumerate(ROWS)]
+
+# 行容器必须与它下面的面板交错排列，按 y 排序（同一 y 行在前）
+PANELS = sorted(ROW_PANELS + PANELS,
+                key=lambda _p: (_p["gridPos"]["y"], 0 if _p["type"] == "row" else 1, _p["gridPos"]["x"]))
+
 for _p in PANELS:
     if _p["id"] in (12, 13):
         _p["timeFrom"] = "3d"
@@ -274,6 +300,7 @@ dashboard = {
             "sort": 1,
             "multi": False,
             "includeAll": False,
+            "current": {"selected": True, "text": "okx", "value": "okx"},
         }]
     },
 }
@@ -300,5 +327,5 @@ titles = [p["title"] for p in back["panels"]]
 print("[verify] panels:", len(titles))
 for t in titles:
     print("  -", t)
-assert len(titles) == 13, titles
+assert len(titles) == 16, titles  # 13 面板 + 3 个分区行
 print("✅ 看板已部署并回读确认")
