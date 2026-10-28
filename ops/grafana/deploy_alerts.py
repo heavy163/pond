@@ -135,21 +135,15 @@ RULES = [
     ),
     rule(
         "P2 采集码数骤降",
-        """SELECT max(drop_pct) FROM (
+        """SELECT max(100 * (1 - cur / nullIf(med, 0))) FROM (
              SELECT venue,
-                    (1 - uniqExactIf(code, open_time >= toStartOfHour(now()) - INTERVAL 3 HOUR
-                                           AND open_time <  toStartOfHour(now()))
-                       / nullIf(uniqExactIf(code, open_time >= toStartOfHour(now()) - INTERVAL 27 HOUR
-                                                AND open_time <  toStartOfHour(now()) - INTERVAL 24 HOUR), 0)) * 100 AS drop_pct
-             FROM cryptos.kline_futures_1h GROUP BY venue
+                    avgIf(codes, checked_at >= now() - INTERVAL 3 HOUR) AS cur,
+                    quantile(0.5)(codes) AS med
+             FROM cryptos.sync_stat
+             WHERE checked_at >= now() - INTERVAL 7 DAY AND codes > 0
+             GROUP BY venue
            )""",
-        "P2", "某所近 1h 采集码数比昨日同期下降超过 20%（换池或大量失败）", "10m", "gt", 5,
-    ),
-    rule(
-        "P2 OI 永久丢失量激增",
-        """SELECT count() FROM cryptos.coverage FINAL
-           WHERE status = 'lost' AND data_type = 'oi' AND trade_date = today()""",
-        "P2", "OI 丢失量超过 250（基线约 177）。6 家快照所 OI 无历史，停机即永久丢；突增说明停机时间变长", "30m", "gt", 250,
+        "P2", "某所采集码数比 7 日中位数下降超过 20%（换池未生效 / 标的池配置写错）", "10m", "gt", 20,
     ),
     rule(
         "P3 汇率异常",

@@ -138,6 +138,63 @@ PANELS = [
         18, 8, 6, 7,
         desc="码数 × 小时数。骤降说明换池或大量失败。",
     ),
+    # ---------- 数据量可视化 ----------
+    panel(
+        7, "⑦ 各所每小时 K 线根数（近 24h）",
+        """SELECT toStartOfHour(open_time) AS time, venue, count() AS bars
+           FROM cryptos.kline_futures_1h
+           WHERE open_time >= now() - INTERVAL 24 HOUR
+           GROUP BY time, venue ORDER BY time""",
+        0, 15, 12, 8, ptype="timeseries", fmt=1,
+        desc="每所每小时应≈码数（28~30）。2026-10-27 20:00~10-28 05:00 出现 57 根属历史异常（修复任务当时在维护出池的旧码，已修），会随 24h 窗口滚出。",
+    ),
+    panel(
+        8, "⑧ 各所 × 数据类型 24h 行数",
+        """SELECT venue,
+                  sum(kline_fut) AS kline_fut,
+                  sum(kline_spot) AS kline_spot,
+                  sum(oi) AS oi,
+                  sum(funding) AS funding
+           FROM (
+             SELECT venue, uniqExact(open_time, code) AS kline_fut, 0 AS kline_spot, 0 AS oi, 0 AS funding
+             FROM cryptos.kline_futures_1h WHERE open_time >= now() - INTERVAL 24 HOUR GROUP BY venue
+             UNION ALL SELECT venue, 0, uniqExact(open_time, code), 0, 0
+             FROM cryptos.kline_spot_1h WHERE open_time >= now() - INTERVAL 24 HOUR GROUP BY venue
+             UNION ALL SELECT venue, 0, 0, uniqExact(datetime, code), 0
+             FROM cryptos.open_interest WHERE datetime >= now() - INTERVAL 24 HOUR GROUP BY venue
+             UNION ALL SELECT venue, 0, 0, 0, uniqExact(datetime, code)
+             FROM cryptos.funding_rate WHERE datetime >= now() - INTERVAL 24 HOUR GROUP BY venue
+           ) GROUP BY venue ORDER BY venue""",
+        12, 15, 12, 8,
+        desc="现货所（upbit）没有 oi/funding，显示 0 属正常。",
+    ),
+    panel(
+        9, "⑨ 各所采集码数（近 24h）",
+        """SELECT toStartOfHour(open_time) AS time, venue, uniqExact(code) AS codes
+           FROM cryptos.kline_futures_1h
+           WHERE open_time >= now() - INTERVAL 24 HOUR
+           GROUP BY time, venue ORDER BY time""",
+        0, 23, 8, 7, ptype="timeseries", fmt=1,
+        desc="码数应恒定（27~30）。跳变说明换池、或修复任务在维护出池的旧码。",
+    ),
+    panel(
+        10, "⑩ OI 每小时采集条数（近 24h）",
+        """SELECT toStartOfHour(datetime) AS time, venue, count() AS rows
+           FROM cryptos.open_interest
+           WHERE datetime >= now() - INTERVAL 24 HOUR
+           GROUP BY time, venue ORDER BY time""",
+        8, 23, 8, 7, ptype="timeseries", fmt=1,
+        desc="OI 是快照数据，每小时一轮。断档 = 那一小时永久丢失（6 家所无历史可补）。",
+    ),
+    panel(
+        11, "⑪ 累计数据量（全库）",
+        """SELECT (SELECT count() FROM cryptos.kline_futures_1h) AS kline_fut,
+                  (SELECT count() FROM cryptos.kline_spot_1h)    AS kline_spot,
+                  (SELECT count() FROM cryptos.open_interest)    AS oi,
+                  (SELECT count() FROM cryptos.funding_rate)     AS funding""",
+        16, 23, 8, 7, ptype="stat",
+        desc="全量行数。仅作总量参考，异常要靠上面几张按所/按小时的图。",
+    ),
 ]
 
 dashboard = {
@@ -175,5 +232,5 @@ titles = [p["title"] for p in back["panels"]]
 print("[verify] panels:", len(titles))
 for t in titles:
     print("  -", t)
-assert len(titles) == 6, titles
+assert len(titles) == 11, titles
 print("✅ 看板已部署并回读确认")
