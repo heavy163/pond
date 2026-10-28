@@ -186,8 +186,9 @@ class CryptoHelper:
             async with asyncio.timeout(spec.deadline_sec):
                 async with make_adapter(spec) as ad:
                     uni = await self._universe(ad, spec, refresh)
-                    res.codes = len(uni["perp"])
-                    if not uni["perp"]:
+                    res.codes = len(uni["perp"]) or len(uni["spot"])
+                    # 纯现货所（upbit）没有永续是正常的，只有声明了合约类数据才报错
+                    if not uni["perp"] and {"kline", "funding", "oi", "mark"} & set(spec.data):
                         res.status = PARTIAL
                         res.errors.append(f"{spec.name}: 合约 universe 为空")
                     for dtype in spec.data:
@@ -284,11 +285,39 @@ class CryptoHelper:
         sem = asyncio.Semaphore(spec.concurrency)
         total = 0
 
+        # 每个币单独 INSERT 会在全量下变成几千次 HTTP 往返，ClickHouse 侧
+        # 还会爆 part；改成攒够 500 行写一次（原来 3,519 次 → 约 40 次）。
+        buf: list[dict] = []
+        buf_lock = asyncio.Lock()
+
+        async def flush() -> None:
+            if not buf or self.dry_run:
+                buf.clear()
+                return
+            rows = list(buf)
+            buf.clear()
+            await asyncio.to_thread(self.store.insert, table, rows)
+
+        done = {"n": 0}
+        t_start = time.monotonic()
+
         async def one(raw: str) -> int:
             async with sem:
                 rows = clip_window(table, await fn(raw, start, end), start, end)
+                done["n"] += 1
+                if done["n"] % 50 == 0:
+                    el = time.monotonic() - t_start
+                    logger.info(
+                        f"[{spec.name}] {dtype} 进度 {done['n']}/{len(raw_codes)}"
+                        f" {el:.0f}s ({done['n']/el:.2f}/s)"
+                    )
                 if rows and not self.dry_run:
-                    await asyncio.to_thread(self.store.insert, table, rows)
+                    async with buf_lock:
+                        buf.extend(rows)
+                        need = len(buf) >= 500
+                    if need:
+                        async with buf_lock:
+                            await flush()
                 return len(rows)
 
         outcomes = await asyncio.gather(
@@ -300,6 +329,8 @@ class CryptoHelper:
                     res.errors.append(f"{dtype} {raw}: {type(o).__name__}: {o}")
             else:
                 total += o
+        async with buf_lock:
+            await flush()
         return total
 
     @staticmethod

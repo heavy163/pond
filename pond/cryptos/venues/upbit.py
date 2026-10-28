@@ -89,12 +89,15 @@ class UpbitAdapter(VenueAdapter):
             if not d:
                 break
             oldest = None
+            page_oldest = None
             for r in d:
                 ts = snap_to_hour(
                     datetime.fromisoformat(r["candle_date_time_utc"]).replace(
                         tzinfo=timezone.utc
                     )
                 )
+                if page_oldest is None or ts < page_oldest:
+                    page_oldest = ts
                 if ts < start or ts >= end:
                     continue
                 if oldest is None or ts < oldest:
@@ -118,9 +121,12 @@ class UpbitAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
-            if oldest is None or len(d) < self.PAGE:
+            # 第一页就已经覆盖到 start 之前 → 窗口内的数据一次拿全，不用再翻页。
+            # 之前只判断 oldest(in-window)，稀疏市场会白翻一页，请求量翻倍
+            # （实测 299 个市场要 748 次请求，2/s 桶下白多花 200 秒）。
+            if page_oldest is None or page_oldest <= start or len(d) < self.PAGE:
                 break
-            cursor = oldest
+            cursor = oldest if oldest is not None else page_oldest
         return out
 
     # ---------------- Upbit 没有的东西 ----------------

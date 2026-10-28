@@ -90,6 +90,9 @@ class CryptoStore:
             password=password,
             database=database,
             connect_timeout=connect_timeout,
+            # 默认 send_receive_timeout=300s：keep-alive 连接被服务端单方关闭后
+            # 会一直等，把 asyncio.to_thread 的 worker 占死（实测 upbit 轮次卡住）。
+            send_receive_timeout=20,
         )
         self._tls = threading.local()
         self._clients: list = []
@@ -127,9 +130,25 @@ class CryptoStore:
         rows = drop_future_rows(table, rows)
         cols = COLUMNS[table]
         data = [[r[c] for c in cols] for r in rows]
-        self._client().insert(
-            table=table, data=data, column_names=cols, database=self.database
-        )
+        try:
+            self._client().insert(
+                table=table, data=data, column_names=cols, database=self.database
+            )
+        except Exception:
+            # 僵死/被服务端关闭的 keep-alive 连接：丢掉本线程的 client 重试一次
+            logger.warning(f"[store] insert {table} 失败，重建连接重试")
+            with self._lock:
+                old = getattr(self._tls, "client", None)
+                if old in self._clients:
+                    self._clients.remove(old)
+            try:
+                old.close()
+            except Exception:
+                pass
+            self._tls.client = None
+            self._client().insert(
+                table=table, data=data, column_names=cols, database=self.database
+            )
         return len(rows)
 
     # ---------------- 读 ----------------
