@@ -113,7 +113,10 @@ class GapDetector:
             # 产生 56 条纯噪声的 gap（实测踩过）。
             allowed = set(self.config.get(v).data) if v in self.config.venues else None
             for dt in [d for d in data_types if allowed is None or d in allowed]:
+                allow = (universes or {}).get(v)
                 for (code, d), e in self.grid(v, dt, days).items():
+                    if allow is not None and code not in allow:
+                        continue      # 出池的旧码不进台账，否则下游会去追一个我们故意不采的码
                     if e["actual"] >= e["expected"]:
                         continue
                     repairable = self._repairable(v, dt, d)
@@ -297,7 +300,11 @@ class GapDetector:
     # ---------------- 台账 ----------------
 
     def write_coverage(
-        self, venues: list[str], days: int = 7, data_types: list[str] | None = None
+        self,
+        venues: list[str],
+        days: int = 7,
+        data_types: list[str] | None = None,
+        universes: dict[str, set[str]] | None = None,
     ) -> int:
         """每 (venue, data_type, code, 日) 一行：n_expected / n_actual / status。
 
@@ -313,7 +320,10 @@ class GapDetector:
         for v in venues:
             allowed = set(self.config.get(v).data) if v in self.config.venues else None
             for dt in [d for d in data_types if allowed is None or d in allowed]:
+                allow = (universes or {}).get(v)
                 for (code, d), e in self.grid(v, dt, days).items():
+                    if allow is not None and code not in allow:
+                        continue      # 出池的旧码不进台账，否则下游会去追一个我们故意不采的码
                     if e["actual"] >= e["expected"]:
                         status, note = "ok", ""
                     elif e["delisted"]:

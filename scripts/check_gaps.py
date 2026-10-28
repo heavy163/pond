@@ -91,7 +91,25 @@ def main() -> int:
         if len(gaps) > 12:
             print(f"  ... 另有 {len(gaps) - 12} 个")
 
-    rc = 0
+    def _live_universes(cfg, venues: list[str]) -> dict[str, set[str]]:
+    """各所**当前** universe 的 code 集合（以交易所实时返回为准）。"""
+
+    async def one(v):
+        from pond.cryptos.venues.registry import make_adapter
+
+        spec = cfg.get(v)
+        async with make_adapter(spec) as ad:
+            inst = await ad.instruments()
+        raw2code = {i["raw_code"]: i["code"] for i in inst}
+        return v, {raw2code[r] for r in spec.select_instruments(inst) if r in raw2code}
+
+    async def all_():
+        return dict(await asyncio.gather(*[one(v) for v in venues]))
+
+    return asyncio.run(all_())
+
+
+rc = 0
     if args.execute:
         if repairable and not args.no_repair:
             print("\n开始修复 ...")
@@ -104,7 +122,7 @@ def main() -> int:
         if args.no_coverage:
             print("（--no-coverage：跳过台账，台账由每日 00:20 写）")
         else:
-            n = det.write_coverage(venues, args.days, data)
+            n = det.write_coverage(venues, args.days, data, universes=_live_universes(cfg, venues))
             print(f"coverage 台账写入 {n} 行")
     else:
         print("\n（dry-run：加 --execute 才会修复并写 coverage 台账）")
