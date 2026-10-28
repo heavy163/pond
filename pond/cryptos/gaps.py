@@ -89,6 +89,7 @@ class RepairResult:
     gaps: list[Gap] = field(default_factory=list)
     repaired: int = 0
     failed: int = 0
+    empty: int = 0          # 交易所确实没有这段数据（不是故障）
     lost: int = 0
     skipped_codes: int = 0        # 不在当前 universe 里、主动跳过的码
     errors: list[str] = field(default_factory=list)
@@ -414,7 +415,9 @@ class GapRepairer:
             res.errors.append(f"{venue}/{dt}/{code} {lo}~{hi}: {type(e).__name__}: {e}")
             return
         if not rows:
-            res.failed += 1
+            # 交易所对这个标的确实没有数据（停牌/从未有 OI），不算修复失败：
+            # 算 failed 会让每轮退出码非 0，变成长期假警报。
+            res.empty += 1
             res.errors.append(f"{venue}/{dt}/{code} {lo}~{hi}: 交易所返回空")
             return
         for r in rows:

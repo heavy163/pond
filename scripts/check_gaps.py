@@ -114,7 +114,7 @@ def main() -> int:
         if repairable and not args.no_repair:
             print("\n开始修复 ...")
             rep = asyncio.run(GapRepairer(store, cfg, execute=True).repair(repairable))
-            print(f"修复完成：补回 {rep.repaired} 行，失败 {rep.failed} 个窗口")
+            print(f"修复完成：补回 {rep.repaired} 行，失败 {rep.failed} 个窗口，交易所无数据 {getattr(rep, 'empty', 0)} 个窗口")
             for e in rep.errors[:8]:
                 print(f"  ! {e}")
             if rep.failed:
