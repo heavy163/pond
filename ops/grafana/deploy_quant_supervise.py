@@ -101,8 +101,8 @@ SELECT d, max(ic1) AS "IC_1h", max(ic24) AS "IC_24h", max(ic72) AS "IC_72h" FROM
 ) GROUP BY d ORDER BY d"""
 
 SQL_IC_CUM = CTE + """
-SELECT d, round(sumDaily, 4) AS "IC_72h_累计",
-       round(runningAcc, 4) AS "累计" FROM (
+SELECT d, round(sumDaily, 4) AS "每日IC(72h)",
+       round(runningAcc, 4) AS "累计IC(72h)" FROM (
     SELECT d, sumDaily,
            sum(sumDaily) OVER (ORDER BY d) AS runningAcc
     FROM (
@@ -426,8 +426,19 @@ P.append(table(nid(), "10 分组 × 未来 24h 超额收益", SQL_DECILE, 12, y,
 y += 8
 P.append(ts(nid(), "多空组每日超额（多 9,10 / 空 1,2）", SQL_LS_DAILY, 0, y, 12, 8, unit="none",
             desc="策略实际选的组：9,10 做多、1,2 做空（value 越大越看多）。蓝=多头组超额、橙=空头组超额、绿=多空价差。"))
-P.append(ts(nid(), "IC 72h 累计", SQL_IC_CUM, 12, y, 12, 8,
-            desc="日 IC 累加。持续向上=信号长期有效；走平或掉头=近期失效。"))
+_ic_panel = ts(nid(), "IC 72h：每日值 与 累计值", SQL_IC_CUM, 12, y, 12, 8, bars=True,
+                desc="左轴柱=当日 rank IC（0.0x 量级）；右轴线=从窗口第一天累加（1.x 量级）。"
+                     "两者量纲差一个数量级，不能比高低——看的是累计线是否单调向上、日柱是否长期为正。")
+_ic_panel["fieldConfig"]["overrides"] = [{
+    "matcher": {"id": "byName", "options": "累计IC(72h)"},
+    "properties": [
+        {"id": "custom.axisPlacement", "value": "right"},
+        {"id": "custom.drawStyle", "value": "line"},
+        {"id": "custom.fillOpacity", "value": 0},
+        {"id": "custom.lineWidth", "value": 2},
+    ],
+}]
+P.append(_ic_panel)
 y += 8
 
 # ③ 策略实盘
