@@ -26,7 +26,7 @@ cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
 凭证：`~/.hermes/secrets/grafana_token`（Grafana service account token，600 权限，**不入库**）。
 可用环境变量 `GRAFANA_URL` / `GRAFANA_TOKEN_FILE` 覆盖。
 
-## 看板面板（11 个）
+## 看板面板（13 个）
 
 **健康度（上半区）**
 
@@ -48,6 +48,19 @@ cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
 | ⑨ | 各所采集码数 | 码数跳变=换池或修复在维护出池的旧码 |
 | ⑩ | OI 每小时采集条数 | OI 是快照，断档即永久丢失（6 家所无历史可补） |
 | ⑪ | 累计数据量（全库） | 总量参考 |
+
+**单所视图（下半区，靠顶部变量 `交易所` 切换）**
+
+| # | 面板 | 用途 |
+|---|---|---|
+| ⑫ | 单所各类数据量（$venue，近 3 天） | 单所 × {kline_fut, kline_spot, oi, funding} × 时间。kline/oi 应≈该所码数；funding 是 8h 一次的稀疏序列；现货所无 oi/funding 属正常 |
+| ⑬ | 单所状态（$venue） | 该所选中的 status / 滞后小时 / 近 3h 码数 / 24h bar 数 |
+
+变量 `venue` 由 `SELECT DISTINCT venue FROM cryptos.sync_stat` 填充（当前 9 个：bitget/bybit/gate/htx/
+hyperliquid/kucoin/mexc/okx/upbit）。**上半区 11 个面板不引用该变量**，始终保持全所口径。
+
+⑬ 的滞后时间跨 `kline_futures_1h` 与 `kline_spot_1h` 取 `greatest(max(open_time))`：
+纯现货所（upbit）没有合约表，只查 futures 会算出 1970 年 → 滞后 498105 小时。
 
 面板口径统一用 `uniqExact(...)` 而不是 `count()`：ReplacingMergeTree 在后台合并完成前会有重复版本，
 `count()` 会把同一根 bar 数多次（历史上 `n_actual` 曾算出 27/24 > 100%）。
