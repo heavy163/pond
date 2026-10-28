@@ -1764,3 +1764,78 @@ python scripts/check_gaps.py --venue upbit --days 1 --data spot
 python scripts/check_gaps.py --venue upbit --days 1 --data spot --execute
 ```
 实测：56 检出 → 补回 756 行 → 复查 0 缺口 → 台账 28 码 × 24/24 ok。
+
+---
+
+## 21. 未来数据与未收盘 bar：一次巡检挖出的两条污染路径
+
+### 21.1 症状
+
+巡检时 `sync_stat` 全部 `synced`、9 家无一报错，但库里躺着 **247 行未来数据**：
+
+```sql
+SELECT venue, count(), uniqExact(code), max(open_time)
+FROM cryptos.kline_futures_1h WHERE open_time > now() GROUP BY venue;
+-- mexc  247  13  2026-10-28 23:00:00     ← 当时才 04:48 UTC
+```
+
+全部是 MEXC 的 `*STOCK` 类代币（AAPLSTOCK / AALSTOCK / ABBVSTOCK …）。
+直接调它的接口可以对上：**04:50 请求，它返回 04:00（未收盘）和 05:00（未来）两根**。
+
+**危害不是"多了几行"，而是它让所有健康指标失真**：
+
+| 指标 | 被污染后的表现 |
+|---|---|
+| 新鲜度 | `max(open_time)` 跑到未来 18 小时 → 看起来"数据超前"，实际掩盖了真实停更 |
+| 缺口检测 | `ceiling` 取全所最晚 bar = 未来值 → 所有历史区间都"应该"有数据 → 大面积假缺口 |
+| 覆盖率台账 | `n_actual` 虚高 |
+
+这正是"同步成功 ≠ 数据正确"的典型：**`sync_stat` 只看请求有没有报错，不看写进去的是什么东西。**
+
+### 21.2 第二条污染路径：修复在维护已经出池的码
+
+MEXC 表里有 **56** 个码，但当前 universe 只有 **28** 个 —— 换池前按字母序选的
+`4STOCK / AAPLSTOCK / 0G / 1000000BABYDOGE` 等还在表里。
+`GapRepairer` 按"表里出现过的所有码"回灌，于是这些旧码每小时被重拉一次。
+
+它和第一条互相放大：**旧码在 MEXC 上正好是返回未来 bar 的那批 → 每小时把未来数据写回来一次。**
+
+### 21.3 四道闸（已落地）
+
+| 层 | 函数 | 作用 |
+|---|---|---|
+| 抓取 | `store.clip_window(table, rows, start, end)` | 裁到 `[start, end)`，挡住**未收盘的当前小时 bar**（OHLC 还在变，比缺一根更糟） |
+| 入库 | `store.drop_future_rows(table, rows)` | 唯一的 `insert()` 入口，丢 `> now + 5min`（容差只拦真未来，不杀秒级时钟偏差） |
+| 修复 | `GapRepairer._repair_code` | `end = min(日末, 最近已收盘整点)` |
+| 范围 | `GapRepairer.repair` | 用 `adapter.instruments()` 的**当前 universe** 过滤，出池的码不再维护 |
+
+### 21.4 验证
+
+```bash
+# 清掉已入库的未来数据
+ALTER TABLE cryptos.kline_futures_1h DELETE WHERE open_time > now();
+ALTER TABLE cryptos.kline_futures_1h DELETE WHERE open_time >= toStartOfHour(now());
+
+# 造洞 → 检出 → 修复 → 复查
+ALTER TABLE cryptos.kline_futures_1h DELETE
+WHERE venue='mexc' AND code='BTC-USDT'
+  AND open_time IN ('2026-10-28 01:00:00','2026-10-28 02:00:00');
+python scripts/check_gaps.py --venue mexc --days 1 --data kline --execute
+```
+
+实测：mexc 最新 bar 由 `04:00`（未收盘）回落到 **`03:00`（最后一个已收盘）**，
+未来行 **0**、未收盘行 **0**，造洞补回 4 行。
+
+### 21.5 对应的监控规则（Grafana 必加）
+
+这两条应该直接做成告警，因为它们**不会被 `sync_stat` 发现**：
+
+```sql
+-- P1：出现未来数据（任何一行都说明适配器口径错了）
+SELECT count() FROM cryptos.kline_futures_1h WHERE open_time > now() + INTERVAL 5 MINUTE;
+
+-- P2：universe 码数异常增长（修复在维护出池的码，或换池没生效）
+SELECT venue, uniqExact(code) FROM cryptos.kline_futures_1h
+WHERE open_time >= now() - INTERVAL 1 DAY GROUP BY venue;
+-- 与 cryptos.instrument 里该所当前码数对比，偏差 >10% 告警
+```
