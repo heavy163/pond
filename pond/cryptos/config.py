@@ -126,6 +126,7 @@ class CryptosConfig:
     lookback_hours: int = 6
     max_total_connections: int = 64
     round_budget_sec: int = 3300
+    filter_spot_by_perp: bool = True
     venues: dict[str, VenueSpec] = field(default_factory=dict)
 
     # ---------------- 加载 ----------------
@@ -158,6 +159,7 @@ class CryptosConfig:
             lookback_hours=int(g.get("lookback_hours", self.lookback_hours)),
             max_total_connections=int(g.get("max_total_connections", self.max_total_connections)),
             round_budget_sec=int(g.get("round_budget_sec", self.round_budget_sec)),
+            filter_spot_by_perp=bool(g.get("filter_spot_by_perp", self.filter_spot_by_perp)),
             venues=venues,
         )
 

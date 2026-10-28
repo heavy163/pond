@@ -133,7 +133,7 @@ class GateAdapter(VenueAdapter):
                     "to": page_end - 1,
                 },
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             if not rows:
                 break
@@ -180,7 +180,7 @@ class GateAdapter(VenueAdapter):
                 f"{self.BASE}/spot/candlesticks",
                 {"currency_pair": raw_code, "interval": "1h",
                  "from": cursor, "to": page_end - 1},
-                endpoint="kline", cost=2,
+                endpoint="kline", cost=1,
             )
             if not rows:
                 break

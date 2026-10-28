@@ -107,7 +107,7 @@ class MexcAdapter(VenueAdapter):
                 "end": int(end.timestamp()),
             },
             endpoint="kline",
-            cost=2,
+            cost=1,
         )
         data = d.get("data") or {}
         times = data.get("time") or []
@@ -159,7 +159,7 @@ class MexcAdapter(VenueAdapter):
                 "https://api.mexc.com/api/v3/klines",
                 {"symbol": symbol, "interval": "60m",
                  "startTime": cursor, "endTime": page_end - 1, "limit": 1000},
-                endpoint="kline", cost=2,
+                endpoint="kline", cost=1,
             )
             if not rows:
                 break

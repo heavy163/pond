@@ -22,7 +22,7 @@ DB = "cryptos"
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hours", type=int, default=3, help="以最近 N 小时内是否有数据为准")
+    ap.add_argument("--hours", type=int, default=3, help="以最近 N 小时内有写入为准（用 ingested_at，不用 bar 时间）")
     ap.add_argument("--venue", default=None)
     ap.add_argument("--show-missing", type=int, default=5, help="每所最多列出几个缺失 code")
     args = ap.parse_args()
@@ -43,10 +43,10 @@ def main() -> int:
         LEFT JOIN (
             SELECT venue, code, 'x' AS code FROM (
                 SELECT venue, code FROM {DB}.kline_futures_1h
-                 WHERE open_time > now() - INTERVAL {args.hours} HOUR
+                 WHERE ingested_at > now() - INTERVAL {args.hours} HOUR
                 UNION ALL
                 SELECT venue, code FROM {DB}.kline_spot_1h
-                 WHERE open_time > now() - INTERVAL {args.hours} HOUR
+                 WHERE ingested_at > now() - INTERVAL {args.hours} HOUR
             ) GROUP BY venue, code
         ) k ON i.venue = k.venue AND i.code = k.code
         GROUP BY i.venue, i.contract_type
@@ -82,10 +82,10 @@ def main() -> int:
             LEFT JOIN (
                 SELECT venue, code, max(1) AS hit FROM (
                     SELECT venue, code FROM {DB}.kline_futures_1h
-                     WHERE open_time > now() - INTERVAL {args.hours} HOUR
+                     WHERE ingested_at > now() - INTERVAL {args.hours} HOUR
                     UNION ALL
                     SELECT venue, code FROM {DB}.kline_spot_1h
-                     WHERE open_time > now() - INTERVAL {args.hours} HOUR
+                     WHERE ingested_at > now() - INTERVAL {args.hours} HOUR
                 ) GROUP BY venue, code
             ) k ON i.venue = k.venue AND i.code = k.code
             WHERE k.hit = 0

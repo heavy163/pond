@@ -127,7 +127,7 @@ class BybitAdapter(VenueAdapter):
                     "limit": 1000,
                 },
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             rows = (d.get("result") or {}).get("list") or []
             if not rows:

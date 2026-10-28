@@ -226,16 +226,33 @@ class CryptoHelper:
         混用会漏采（现货对里有很多没有合约的币）。
         """
         inst = await ad.instruments()
-        spot_inst = await ad.spot_instruments() if "spot" in spec.data else []
-        rows = inst + spot_inst
+        # 有些所（upbit）instruments() 本身就返回现货市场（contract_type='spot'），
+        # 没有独立的「合约列表」。所以先按 contract_type 把 inst 拆开，
+        # 再对只有合约列表的所去补 spot_instruments()。
+        perp_rows = [r for r in inst if (r.get("contract_type") or "perp") != "spot"]
+        spot_rows = [r for r in inst if r.get("contract_type") == "spot"]
+        if "spot" in spec.data and not spot_rows:
+            spot_rows = await ad.spot_instruments()
+        rows = perp_rows + spot_rows
         # 每轮都写（ReplacingMergeTree，几千行可忽略）：原先只在「该所一条都没有」时写，
         # 导致新增的 spot 元数据永远进不来。
         if rows and not self.dry_run:
             await asyncio.to_thread(self.store.insert, TABLE_INSTRUMENT, rows)
-        return {
-            "perp": spec.select_instruments(inst),
-            "spot": spec.select_instruments(spot_inst) if spot_inst else [],
-        }
+        perp = spec.select_instruments(perp_rows)
+        spot = spec.select_instruments(spot_rows)
+        # 现货只留「本所有同名永续」的对：没有合约就无法对冲/做空，
+        # 基差、carry、跨期都做不了，采集这类对只是白占配额。
+        # 纯现货所（upbit 没有任何永续）跳过过滤，否则整所被清空。
+        if self.config.filter_spot_by_perp and perp and spot:
+            perp_codes = {r.get("code") for r in perp_rows}
+            keep_raw = {r.get("raw_code") for r in spot_rows if r.get("code") in perp_codes}
+            kept = [c for c in spot if c in keep_raw]
+            logger.info(
+                f"[{spec.name}] 现货按永续过滤: {len(spot)} → {len(kept)} 对"
+                f"（丢弃 {len(spot) - len(kept)} 个无对应合约）"
+            )
+            spot = kept
+        return {"perp": perp, "spot": spot}
 
     def _has_instruments(self, venue: str) -> bool:
         rows = self.store.query(

@@ -89,9 +89,17 @@ class VenueAdapter(ABC):
             await lim.acquire(cost)
             self.stats["requests"] += 1
             try:
-                resp = await self._client.request(
-                    method, url, params=params, json=json_body
+                # httpx 的 timeout 只覆盖单段读写；对端拖着不回包时会挂死，
+                # 加一层硬超时（upbit 实测有过连接 ESTAB 但永不返回）。
+                resp = await asyncio.wait_for(
+                    self._client.request(method, url, params=params, json=json_body),
+                    timeout=self.spec.timeout_sec * 2,
                 )
+            except asyncio.TimeoutError as e:
+                # 服务端拖死（upbit 的 USDG/PYUSD/EURC 等市场会挂住不回包），
+                # 重试只会再花同样的时间，直接放弃这个 symbol。
+                self.stats["network_err"] += 1
+                raise RetriesExhausted(f"{self.name} 请求超时: {url}") from e
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 last_exc = e
                 self.stats["network_err"] += 1
@@ -107,7 +115,9 @@ class VenueAdapter(ABC):
 
             if code == 429:
                 self.stats["http_429"] += 1
-                wait = self._retry_after(resp, default=2.0 ** attempt)
+                # 交易所的 Retry-After 可能给到几百秒（upbit 实测），直接照做会让
+                # 整个桶静默挂死几十分钟。上限 30s，靠重试次数兜底。
+                wait = min(self._retry_after(resp, default=2.0 ** attempt), 30.0)
                 logger.warning(f"[{self.name}] 429，暂停 {wait:.1f}s（{endpoint}）")
                 lim.pause(wait)
                 last_exc = RetriesExhausted(f"{self.name} 429")

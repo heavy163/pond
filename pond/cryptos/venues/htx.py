@@ -111,7 +111,7 @@ class HtxAdapter(VenueAdapter):
                     "to": cursor_end - 1,
                 },
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             rows = d.get("data") or []
             if not rows:
@@ -156,7 +156,7 @@ class HtxAdapter(VenueAdapter):
         d = await self.request(
             "https://api.huobi.pro/market/history/kline",
             {"symbol": symbol, "period": "60min", "size": 2000},
-            endpoint="kline", cost=2,
+            endpoint="kline", cost=1,
         )
         rows = d.get("data") or []
         now = datetime.now(timezone.utc)

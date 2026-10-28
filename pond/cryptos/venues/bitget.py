@@ -110,7 +110,7 @@ class BitgetAdapter(VenueAdapter):
                     "limit": 200,
                 },
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             rows = d.get("data") or []
             if not rows:
@@ -158,7 +158,7 @@ class BitgetAdapter(VenueAdapter):
                 f"{self.BASE}/spot/market/candles",
                 {"symbol": raw_code, "granularity": "1h",
                  "startTime": cursor, "endTime": page_end - 1, "limit": 500},
-                endpoint="kline", cost=2,
+                endpoint="kline", cost=1,
             )
             rows = d.get("data") or []
             if not rows:

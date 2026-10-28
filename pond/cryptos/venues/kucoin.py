@@ -121,7 +121,7 @@ class KucoinAdapter(VenueAdapter):
                     "to": end_ms - 1,
                 },
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             rows = d.get("data") or []
             if not rows:
@@ -171,7 +171,7 @@ class KucoinAdapter(VenueAdapter):
                 "https://api.kucoin.com/api/v1/market/candles",
                 {"symbol": symbol, "type": "1hour",
                  "startAt": cursor, "endAt": page_end - 1},
-                endpoint="kline", cost=2,
+                endpoint="kline", cost=1,
             )
             rows = d.get("data") or []
             if not rows:

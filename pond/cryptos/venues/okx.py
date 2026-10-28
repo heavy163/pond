@@ -111,7 +111,7 @@ class OkxAdapter(VenueAdapter):
                 f"{self.BASE}{path}",
                 {"instId": inst, "bar": "1H", "limit": 300, "after": cursor_end - 1},
                 endpoint="kline",
-                cost=2,
+                cost=1,
             )
             rows = d.get("data") or []
             if not rows:
