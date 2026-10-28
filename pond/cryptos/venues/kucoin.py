@@ -73,6 +73,8 @@ class KucoinAdapter(VenueAdapter):
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
+        if market == "spot":
+            return await self._kline_spot(raw_code, start, end)
         if market != "perp":
             return []
         code = self.resolve_code(raw_code)
@@ -119,6 +121,47 @@ class KucoinAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
+            cursor = page_end
+        return out
+
+    async def _kline_spot(
+        self, raw_code: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """KuCoin 现货 K线：api.kucoin.com/api/v1/market/candles（合约是 api-futures 域）。
+
+        现货 symbol 是 BTC-USDT（合约 raw 是 XBTUSDTM，靠 resolve_code 统一）。
+        数组顺序: [time(秒), open, close, high, low, volume, turnover]
+        """
+        code = self.resolve_code(raw_code)
+        symbol = self.resolve_code(raw_code)
+        cursor, end_s = int(start.timestamp()), int(end.timestamp())
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        SPAN = 1500 * 3600          # 单次最多 1500 根
+        while cursor < end_s:
+            page_end = min(cursor + SPAN, end_s)
+            d = await self.request(
+                "https://api.kucoin.com/api/v1/market/candles",
+                {"symbol": symbol, "type": "1hour",
+                 "startAt": cursor, "endAt": page_end - 1},
+                endpoint="kline", cost=2,
+            )
+            rows = d.get("data") or []
+            if not rows:
+                break
+            for r in rows:
+                ts = to_utc(int(r[0]) * 1000)
+                if ts < start or ts >= end:
+                    continue
+                out.append({
+                    "venue": self.name, "code": code, "open_time": ts,
+                    "open": float(r[1]), "close": float(r[2]),
+                    "high": float(r[3]), "low": float(r[4]),
+                    "volume": float(r[5]), "quote_volume": float(r[6]),
+                    "datetime": ts + timedelta(milliseconds=HOUR_MS - 1),
+                    "count": 0.0, "taker_buy_volume": 0.0,
+                    "taker_buy_quote_volume": 0.0, "ingested_at": now,
+                })
             cursor = page_end
         return out
 

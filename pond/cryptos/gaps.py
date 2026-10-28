@@ -102,8 +102,13 @@ class GapDetector:
     # ---------------- 检测 ----------------
 
     def detect(
-        self, venues: list[str] | None = None, data_types: list[str] | None = None, days: int = 7
+        self,
+        venues: list[str] | None = None,
+        data_types: list[str] | None = None,
+        days: int = 7,
+        universes: dict[str, set[str]] | None = None,
     ) -> list[Gap]:
+        """universes: {venue: 当前 code 集合}。给了就只检查池内的码，出池的旧码不再造缺口。"""
         venues = venues or [s.name for s in self.config.enabled_venues()]
         data_types = data_types or ["kline", "spot", "funding", "oi"]
         gaps: list[Gap] = []

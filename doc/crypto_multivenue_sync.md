@@ -1839,3 +1839,66 @@ SELECT venue, uniqExact(code) FROM cryptos.kline_futures_1h
 WHERE open_time >= now() - INTERVAL 1 DAY GROUP BY venue;
 -- 与 cryptos.instrument 里该所当前码数对比，偏差 >10% 告警
 ```
+
+---
+
+## 22. 现货 K 线：从「只有 Upbit」到 7 家
+
+### 22.1 起因
+
+看板上问「bybit 没有现货数据吗」。查证：**不是交易所没有，是我们没采**。
+`kline_spot_1h` 里只有 upbit——因为其余 6 家适配器的 `kline()` 第一行都是：
+
+```python
+if market != "perp":
+    return []
+```
+
+Bybit `category=spot` 的 BTCUSDT K 线接口实测正常返回，只是我们从没调用过。
+
+### 22.2 各所现货端点差异（这是工作量所在）
+
+| 所 | 端点 | symbol 形态 | 时间单位 | 备注 |
+|---|---|---|---|---|
+| bybit | `/v5/market/kline?category=spot` | BTCUSDT | ms | 与永续同名，只差 category |
+| okx | `/api/v5/market/candles` | BTC-USDT | ms | 永续 raw 是 `BTC-USDT-SWAP`，需去掉 `-SWAP` |
+| gate | `/api/v4/spot/candlesticks` | BTC_USDT | **秒** | 返回**数组**不是 dict：`[t, quoteVol, c, h, l, o, baseVol, closed]` |
+| bitget | `/api/v2/spot/market/candles` | BTCUSDT | ms | `BASE` 已含 `/api/v2`，再拼一次会 404 |
+| kucoin | `api.kucoin.com/api/v1/market/candles` | BTC-USDT | 秒 | 现货是独立域名（合约在 api-futures）；返回 `[t, o, c, h, l, vol, turnover]` |
+| mexc | `api.mexc.com/api/v3/klines` | BTCUSDT | ms | 现货是独立域名（合约在 contract.mexc.com） |
+| htx | `api.huobi.pro/market/history/kline` | btcusdt | — | 现货是独立域名（合约在 api.hbdm.com）；**只有 size 没有 from/to** |
+
+Hyperliquid 是纯永续 DEX，`spot` 返回 0 行，属正常。
+
+### 22.3 实现方式
+
+每家加一个 `_kline_spot()`，`kline(market="spot")` 分派过去；`sync` 侧无需改动——
+`_fetcher()` 早就把 `market="spot"` 传下去了，缺的只是适配器实现。
+配置侧只在各家 `data:` 里加 `spot`。
+
+### 22.4 实测
+
+| 所 | 码数 | 现货行数 | BTC 现货溢价(vs 本所永续) |
+|---|---|---|---|
+| bybit | 27 | 180 | +3.87 bp |
+| okx | 29 | 186 | +3.35 bp |
+| gate | 29 | 186 | +4.31 bp |
+| bitget | 29 | 186 | +4.93 bp |
+| kucoin | 29 | 186 | +3.92 bp |
+| mexc | 28 | 168 | +3.87 bp |
+| htx | 25 | 150 | −0.12 bp |
+| upbit | 28 | 942 | 法币市场，不入对比 |
+
+OHLC 合法性检查：`high < max(o,c)` 0 行、`low > min(o,c)` 0 行、价格 ≤0 0 行（共 2,184 行）。
+
+### 22.5 事故：改文件把脚本改坏了，还提交了
+
+加 `universes` 参数时用 heredoc 做文本手术，把 `check_gaps.py` 里的嵌套函数整体错位了 4 格，
+文件直接 `IndentationError`。**而我提交前没有跑一次**，于是坏文件进了仓库（`9814034`），
+17:02 的定时任务当场报错——同步本身正常，但缺口检测/修复整段失效。
+
+两个教训：
+1. **改完脚本必须跑一次**，哪怕只改缩进。`ast.parse()` 一行就能拦住这类错误。
+2. 文本手术不要用「按行号切片」，要用「按内容定位 + 断言」。行号一错就是静默错位。
+
+修复后 `--days 2 --execute --no-coverage`（与定时任务完全相同的参数）实测 exit 0。

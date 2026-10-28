@@ -62,6 +62,8 @@ class BitgetAdapter(VenueAdapter):
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
+        if market == "spot":
+            return await self._kline_spot(raw_code, start, end)
         if market != "perp":
             return []
         code = self.resolve_code(raw_code)
@@ -110,6 +112,45 @@ class BitgetAdapter(VenueAdapter):
                         "ingested_at": now,
                     }
                 )
+            cursor = page_end
+        return out
+
+    async def _kline_spot(
+        self, raw_code: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """Bitget 现货 K线：/api/v2/spot/market/candles，symbol 与合约同名 BTCUSDT。
+
+        返回数组: [ts, o, h, l, c, baseVol, quoteVol]
+        """
+        code = self.resolve_code(raw_code)
+        cursor, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        SPAN = 500 * HOUR_MS
+        while cursor < end_ms:
+            page_end = min(cursor + SPAN, end_ms)
+            d = await self.request(
+                f"{self.BASE}/spot/market/candles",
+                {"symbol": raw_code, "granularity": "1h",
+                 "startTime": cursor, "endTime": page_end - 1, "limit": 500},
+                endpoint="kline", cost=2,
+            )
+            rows = d.get("data") or []
+            if not rows:
+                break
+            for r in rows:
+                ts = to_utc(r[0])
+                if ts < start or ts >= end:
+                    continue
+                out.append({
+                    "venue": self.name, "code": code, "open_time": ts,
+                    "open": float(r[1]), "high": float(r[2]),
+                    "low": float(r[3]), "close": float(r[4]),
+                    "volume": float(r[5]), "quote_volume": float(r[6]),
+                    "datetime": ts + timedelta(milliseconds=HOUR_MS - 1),
+                    "count": 0.0, "taker_buy_volume": 0.0,
+                    "taker_buy_quote_volume": 0.0, "ingested_at": now,
+                })
             cursor = page_end
         return out
 

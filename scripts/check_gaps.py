@@ -44,6 +44,24 @@ def parse_args():
     return p.parse_args()
 
 
+def _live_universes(cfg, venues: list[str]) -> dict[str, set[str]]:
+    """各所**当前** universe 的 code 集合（以交易所实时返回为准）。"""
+
+    async def one(v):
+        from pond.cryptos.venues.registry import make_adapter
+
+        spec = cfg.get(v)
+        async with make_adapter(spec) as ad:
+            inst = await ad.instruments()
+        raw2code = {i["raw_code"]: i["code"] for i in inst}
+        return v, {raw2code[r] for r in spec.select_instruments(inst) if r in raw2code}
+
+    async def all_():
+        return dict(await asyncio.gather(*[one(v) for v in venues]))
+
+    return asyncio.run(all_())
+
+
 def main() -> int:
     args = parse_args()
     logger.remove()
@@ -59,7 +77,7 @@ def main() -> int:
     data = [d.strip() for d in args.data.split(",") if d.strip()]
 
     det = GapDetector(store, cfg)
-    gaps = det.detect(venues, data, args.days)
+    gaps = det.detect(venues, data, args.days, universes=_live_universes(cfg, venues))
 
     repairable = [g for g in gaps if g.repairable and not g.rampup]
     lost = [g for g in gaps if not g.repairable and not g.rampup]
@@ -86,30 +104,12 @@ def main() -> int:
             print(f"{v:<13}{dt:<9}{n:>9}{miss:>9}{l:>9}")
         print("-" * 84)
         for g in gaps[:12]:
-            flag = "✗ 永久" if not g.repairable else "✓ 可补"
+            flag = "⏳ 首日" if g.rampup else ("✗ 永久" if not g.repairable else "✓ 可补")
             print(f"  {flag}  {g.venue}/{g.data_type}/{g.code} {g.day} 缺 {g.missing}")
         if len(gaps) > 12:
             print(f"  ... 另有 {len(gaps) - 12} 个")
 
-    def _live_universes(cfg, venues: list[str]) -> dict[str, set[str]]:
-    """各所**当前** universe 的 code 集合（以交易所实时返回为准）。"""
-
-    async def one(v):
-        from pond.cryptos.venues.registry import make_adapter
-
-        spec = cfg.get(v)
-        async with make_adapter(spec) as ad:
-            inst = await ad.instruments()
-        raw2code = {i["raw_code"]: i["code"] for i in inst}
-        return v, {raw2code[r] for r in spec.select_instruments(inst) if r in raw2code}
-
-    async def all_():
-        return dict(await asyncio.gather(*[one(v) for v in venues]))
-
-    return asyncio.run(all_())
-
-
-rc = 0
+    rc = 0
     if args.execute:
         if repairable and not args.no_repair:
             print("\n开始修复 ...")

@@ -62,6 +62,8 @@ class HtxAdapter(VenueAdapter):
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
+        if market == "spot":
+            return await self._kline_spot(raw_code, start, end)
         if market != "perp":
             return []
         code = self.resolve_code(raw_code)
@@ -112,6 +114,40 @@ class HtxAdapter(VenueAdapter):
             if oldest >= cursor_end or oldest <= start_s:
                 break
             cursor_end = oldest
+        return out
+
+    async def _kline_spot(
+        self, raw_code: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """HTX 现货 K线：api.huobi.pro（合约是 api.hbdm.com）。
+
+        现货接口只有 size，没有 from/to：一次取最近 2000 根再按窗口裁剪。
+        """
+        code = self.resolve_code(raw_code)
+        symbol = raw_code.replace("-", "").lower()
+        d = await self.request(
+            "https://api.huobi.pro/market/history/kline",
+            {"symbol": symbol, "period": "60min", "size": 2000},
+            endpoint="kline", cost=2,
+        )
+        rows = d.get("data") or []
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            ts = to_utc(int(r["id"]) * 1000)
+            if ts < start or ts >= end:
+                continue
+            out.append({
+                "venue": self.name, "code": code, "open_time": ts,
+                "open": float(r["open"]), "high": float(r["high"]),
+                "low": float(r["low"]), "close": float(r["close"]),
+                "volume": float(r.get("amount") or 0),
+                "quote_volume": float(r.get("vol") or 0),
+                "datetime": ts + timedelta(milliseconds=HOUR_MS - 1),
+                "count": 0.0, "taker_buy_volume": 0.0,
+                "taker_buy_quote_volume": 0.0, "ingested_at": now,
+            })
+        out.sort(key=lambda x: x["open_time"])
         return out
 
     async def funding(

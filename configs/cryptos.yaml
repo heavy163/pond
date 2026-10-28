@@ -40,7 +40,7 @@ venues:
   okx:
     enabled: true
     concurrency: 8
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -57,7 +57,7 @@ venues:
   bybit:
     enabled: true
     concurrency: 8
-    data: [kline, funding, oi]     # OI 只留约 8 天，但确实有历史
+    data: [kline, funding, oi, spot]   # spot 走 category=spot，symbol 与永续同名
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -74,7 +74,7 @@ venues:
   gate:
     enabled: true
     concurrency: 6
-    data: [kline, funding, oi]     # OI 有 180 天历史，四家里最深
+    data: [kline, funding, oi, spot]   # OI 有 180 天历史，四家里最深；spot 走 /spot/candlesticks
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -91,7 +91,7 @@ venues:
   bitget:
     enabled: true
     concurrency: 8
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -108,7 +108,7 @@ venues:
   kucoin:
     enabled: true
     concurrency: 6
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -125,7 +125,7 @@ venues:
   mexc:
     enabled: true
     concurrency: 6
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -142,7 +142,7 @@ venues:
   htx:
     enabled: true
     concurrency: 6
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
@@ -159,7 +159,7 @@ venues:
   hyperliquid:
     enabled: true
     concurrency: 6
-    data: [kline, funding, oi]
+    data: [kline, funding, oi, spot]
     symbols:
       include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
                 SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,

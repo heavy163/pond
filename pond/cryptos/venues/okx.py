@@ -69,8 +69,10 @@ class OkxAdapter(VenueAdapter):
     async def kline(
         self, raw: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
-        if market != "perp":
+        if market not in ("perp", "spot"):
             return []
+        # 永续 raw 形如 BTC-USDT-SWAP；OKX 现货 instId 就是 BTC-USDT
+        inst = raw if market == "perp" else self.resolve_code(raw)
         code = self.resolve_code(raw)
         start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
         cursor_end = end_ms
@@ -80,7 +82,7 @@ class OkxAdapter(VenueAdapter):
             path = "/api/v5/market/candles" if not out else "/api/v5/market/history-candles"
             d = await self.request(
                 f"{self.BASE}{path}",
-                {"instId": raw, "bar": "1H", "limit": 300, "after": cursor_end - 1},
+                {"instId": inst, "bar": "1H", "limit": 300, "after": cursor_end - 1},
                 endpoint="kline",
                 cost=2,
             )

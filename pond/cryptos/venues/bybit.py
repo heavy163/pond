@@ -70,8 +70,10 @@ class BybitAdapter(VenueAdapter):
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
-        if market != "perp":
+        # Bybit 的现货与永续用同一个 symbol 字符串（BTCUSDT），只差 category
+        if market not in ("perp", "spot"):
             return []
+        category = "linear" if market == "perp" else "spot"
         code = self.resolve_code(raw_code)
         start_ms, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
         cursor = start_ms
@@ -83,7 +85,7 @@ class BybitAdapter(VenueAdapter):
             d = await self.request(
                 f"{self.BASE}/v5/market/kline",
                 {
-                    "category": "linear",
+                    "category": category,
                     "symbol": raw_code,
                     "interval": "60",
                     "start": cursor,

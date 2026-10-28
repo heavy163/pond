@@ -63,6 +63,8 @@ class MexcAdapter(VenueAdapter):
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:
+        if market == "spot":
+            return await self._kline_spot(raw_code, start, end)
         if market != "perp":
             return []
         code = self.resolve_code(raw_code)
@@ -106,6 +108,45 @@ class MexcAdapter(VenueAdapter):
                     "ingested_at": now,
                 }
             )
+        return out
+
+    async def _kline_spot(
+        self, raw_code: str, start: datetime, end: datetime
+    ) -> list[dict[str, Any]]:
+        """MEXC 现货 K线：api.mexc.com/api/v3/klines（与合约不同域名）。
+
+        注意：MEXC 现货同样会返回未来时点/未收盘的 bar，由 store 的 clip_window 兜住。
+        """
+        code = self.resolve_code(raw_code)
+        symbol = raw_code.replace("_", "")          # BTC_USDT -> BTCUSDT
+        cursor, end_ms = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+        SPAN = 1000 * HOUR_MS
+        while cursor < end_ms:
+            page_end = min(cursor + SPAN, end_ms)
+            rows = await self.request(
+                "https://api.mexc.com/api/v3/klines",
+                {"symbol": symbol, "interval": "60m",
+                 "startTime": cursor, "endTime": page_end - 1, "limit": 1000},
+                endpoint="kline", cost=2,
+            )
+            if not rows:
+                break
+            for r in rows:      # [openTime, o, h, l, c, vol, closeTime, quoteVol, ...]
+                ts = to_utc(r[0])
+                if ts < start or ts >= end:
+                    continue
+                out.append({
+                    "venue": self.name, "code": code, "open_time": ts,
+                    "open": float(r[1]), "high": float(r[2]),
+                    "low": float(r[3]), "close": float(r[4]),
+                    "volume": float(r[5]), "quote_volume": float(r[7] or 0),
+                    "datetime": ts + timedelta(milliseconds=HOUR_MS - 1),
+                    "count": 0.0, "taker_buy_volume": 0.0,
+                    "taker_buy_quote_volume": 0.0, "ingested_at": now,
+                })
+            cursor = page_end
         return out
 
     async def funding(
