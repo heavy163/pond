@@ -62,7 +62,12 @@ ALIASES: dict[str, tuple[str, str]] = {
 # 例：币安 DIAUSDT 是 DIA 预言机币（underlyingType=COIN），不是道指 ETF DIA；
 #     SPXUSDT 是 SPX6900 meme 币，不是标普 500；ALLUSDT 币安标的是 INDEX。
 # 这类一律标 ambiguous，等成交量指纹（周末/夜间零成交）判定。
-COLLISIONS = {"DIA", "SPX", "ALL", "MEDIATEK", "MSTR", "COIN", "MARA", "RIOT"}
+COLLISIONS = {"DIA", "SPX", "ALL", "MEDIATEK", "MSTR", "COIN", "MARA", "RIOT", "META"}
+
+# 纯加密现货所：整所只有币，没有传统标的。命名撞车要按所剔除，
+# 例如 upbit 的 META-KRW 是 Metadium（韩国币），不是 Meta Platforms；
+# SPX-KRW 是 SPX6900 meme 币，不是标普 500。
+CRYPTO_ONLY_VENUES = {"upbit"}
 
 
 def normalize(base: str) -> str:
@@ -107,6 +112,8 @@ def classify(base: str, tradfi: dict[str, str], coins: set[str]) -> tuple[str, s
         return "premarket", b[3:], "venue_suffix"
 
     if n in tradfi and n not in COLLISIONS:            # 2. 币安权威映射
+        if n in coins:                                # 币安自己既当币又当传统标的
+            return "ambiguous", n, "collision"
         return tradfi[n], n, "binance"
     if n in COLLISIONS and (n in coins or n in tradfi):  # 3. 撞车
         return "ambiguous", n, "collision"
@@ -127,19 +134,21 @@ def main() -> int:
 
     c = clickhouse_connect.get_client(**CH)
     rows = c.query(f"""
-        SELECT venue, code FROM {DB}.instrument FINAL
-        WHERE contract_type = 'perp'
+        SELECT venue, code, contract_type FROM {DB}.instrument FINAL
+        WHERE contract_type IN ('perp', 'spot')
     """).result_rows
 
     now = datetime.now(timezone.utc)
     out = []
     per_venue: dict[str, Counter] = defaultdict(Counter)
     samples: dict[tuple[str, str], list[str]] = defaultdict(list)
-    for venue, code in rows:
+    for venue, code, ctype in rows:
         cls, und, via = classify(code.split("-")[0], tradfi, coins)
-        per_venue[venue][cls] += 1
-        if cls != "crypto" and len(samples[(venue, cls)]) < 4:
-            samples[(venue, cls)].append(code)
+        if venue in CRYPTO_ONLY_VENUES:
+            cls, via = "crypto", "venue_crypto_only"
+        per_venue[f"{venue}/{ctype}"][cls] += 1
+        if cls != "crypto" and len(samples[(f"{venue}/{ctype}", cls)]) < 3:
+            samples[(f"{venue}/{ctype}", cls)].append(code)
         out.append([venue, code, cls, und, via, now])
 
     print(f"{'venue':<13}{'合约数':>7}{'加密':>7}{'股票类':>8}{'商品':>6}{'指数':>6}{'待判':>9}{'TradFi%':>9}")
