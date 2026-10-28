@@ -1,0 +1,31 @@
+[Unit]
+Description=cryptos 多交易所 1h 数据同步（8 家，除 Binance）
+Documentation=file:///mnt/hgfs/e/workspace/FutureTradeDev/pond/doc/crypto_multivenue_sync.md
+# 仓库在 HGFS 挂载点上，挂载没好就别跑
+RequiresMountsFor=/mnt/hgfs/e/workspace/FutureTradeDev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/hgfs/e/workspace/FutureTradeDev/pond
+ExecStart=/usr/bin/bash scripts/cron_cryptos_sync.sh
+
+# 一轮实测 31 秒；配置里 round_budget_sec=3300（55 分钟），这里留到 60 分钟
+TimeoutStartSec=3600
+
+# 内存护栏：单轮实测峰值 < 1G，给到 4G 既够又有上限
+MemoryMax=4G
+
+# 不要和前台任务抢 CPU/IO（这台机器还要跑网关）
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+# systemd 自己记日志，包装脚本另存一份滚动日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptos-sync
+
+[Install]
+WantedBy=default.target

@@ -1203,3 +1203,101 @@ Bybit 的 `open-interest` 接口只给币数，不给 USD。适配器的处理�
 
 不给历史行编造 USD 值——用今天的价格乘 7 天前的 OI 会得到错的价格口径。
 需要 USD 敞口时在因子层 `JOIN kline close` 重算，那里有真正的历史价格。
+
+---
+
+## 17. 调度与运维（已安装）
+
+### 17.1 两个 timer
+
+| timer | 触发 | 作用 | 实测 |
+|---|---|---|---|
+| `cryptos-sync.timer` | 每小时 **:02** | 8 家整轮同步（`--execute`） | 31s，8/8 synced |
+| `cryptos-instruments.timer` | 每日 **00:05** | 刷新合约清单（新上架/下架）+ 补最近 2 小时 | — |
+
+Unit 文件唯一真源在仓库 `deploy/systemd/`，安装方式是「复制到 `~/.config/systemd/user/`」，
+不是手改 systemd 目录里的那份——这样换机器能一键重装。
+
+```bash
+install -m 644 deploy/systemd/*.service deploy/systemd/*.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now cryptos-sync.timer cryptos-instruments.timer
+```
+
+### 17.2 为什么是 :02
+
+`open_time=08:00` 的 1h bar 要到 `09:00:00` 才收盘。09:02 触发时：
+
+- `end = snap_to_hour(09:02) = 09:00` → 窗口内**恰好包含**已收盘的 08:00 bar
+- 不会碰到尚未收盘的 09:00 bar（非闭合 bar 一律不写）
+
+`:00` 触发会漏掉刚收盘的那根；`:30` 触发则多等半小时，下游因子晚半小时。
+
+### 17.3 为什么不补跑
+
+`Persistent=false`。机器休眠/关机错过的轮次**不补**——`lookback_hours=6` 会在下一轮
+自动覆盖最近 6 小时，补跑只会让开机瞬间 8 家并发 N 轮，把交易所配额一次打满。
+
+`oneshot` + `Unit=` 的语义也保证：上一轮没跑完时，定时器不会叠一个实例上去。
+
+### 17.4 隔离：不让同步拖垮网关
+
+这台机器同时跑 Hermes 网关（`hermes-gateway.service`，`OOMPolicy=stop`）。
+同步是独立 unit，因此：
+
+| 护栏 | 值 | 理由 |
+|---|---|---|
+| `MemoryMax` | 4G | 实测峰值 < 1G，兜底防失控 |
+| `Nice` | 10 | 让出 CPU 给前台 |
+| `IOSchedulingPriority` | 6 | 不抢磁盘 |
+| `TimeoutStartSec` | 3600 | 配置里 `round_budget_sec=3300`，留 5 分钟收尾 |
+| `RequiresMountsFor` | `/mnt/hgfs/e/workspace/FutureTradeDev` | 仓库在 HGFS 上，挂载没好就别跑 |
+
+即使同步真的 OOM，被杀的也是它自己这个 unit，**不会连带重启网关**
+（网关 OOM 会 stop，那才是灾难）。
+
+### 17.5 运维命令
+
+```bash
+# 下一次什么时候跑
+systemctl --user list-timers cryptos-sync.timer
+
+# 最近一轮日志
+journalctl --user -u cryptos-sync -n 40 --no-pager
+
+# 滚动日志（保留最近 5000 行）
+tail -50 ~/.local/state/cryptos/sync.log
+
+# 手动补跑一轮（不影响定时器）
+systemctl --user start cryptos-sync.service
+
+# 暂停 / 恢复
+systemctl --user stop cryptos-sync.timer
+systemctl --user start cryptos-sync.timer
+
+# 看失败
+systemctl --user --failed
+```
+
+每轮的耗时/行数/错误落 `cryptos.sync_stat`，查历史：
+
+```sql
+SELECT venue, window_start, status, codes, rows, duration_ms, checked_at
+FROM cryptos.sync_stat FINAL ORDER BY checked_at DESC LIMIT 20;
+```
+
+### 17.6 实测（首次由 systemd 拉起）
+
+```
+venue       status      codes      rows        耗时  errors
+okx         synced         30       254     12.2s       0
+bybit       synced         30       408     17.4s       0
+gate        synced         30       401     23.4s       0
+bitget      synced         30       254     17.6s       0
+kucoin      synced         30       258     15.6s       0
+mexc        synced         30       248     20.3s       0
+htx         synced         30       243     24.6s       0
+hyperliquid synced         30       390     31.0s       0
+```
+
+`ExecStart` exit=0，CPU 7.87s，墙上 31s。`sync_stat` 新增 8 行。

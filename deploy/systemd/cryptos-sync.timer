@@ -1,0 +1,22 @@
+[Unit]
+Description=每小时 :02 触发 cryptos 同步（错开整点，让交易所结算完）
+
+[Timer]
+# 为什么是 :02 而不是 :00
+#   open_time=08:00 的那根 1h bar 要到 09:00:00 才收盘。09:02 触发时
+#   end = snap_to_hour(09:02) = 09:00，窗口内包含已收盘的 08:00 bar，
+#   且不会碰到尚未收盘的 09:00 bar（非闭合 bar 一律不写）。
+OnCalendar=*-*-* *:02:00
+
+# 机器休眠/关机错过的轮次不补跑：lookback_hours=6 会自动补上最近 6 小时，
+# 补跑反而会在开机瞬间并发 8 家 × N 轮，把配额打满。
+Persistent=false
+
+# 同一时刻只允许一个实例；上一轮没跑完就跳过这一轮（systemd 对 oneshot 天然幂等）
+AccuracySec=20s
+RandomizedDelaySec=0
+
+Unit=cryptos-sync.service
+
+[Install]
+WantedBy=timers.target
