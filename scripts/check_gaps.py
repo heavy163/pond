@@ -104,7 +104,7 @@ def main() -> int:
         if args.no_coverage:
             print("（--no-coverage：跳过台账，台账由每日 00:20 写）")
         else:
-            n = det.write_coverage(gaps, venues, args.days)
+            n = det.write_coverage(venues, args.days, data)
             print(f"coverage 台账写入 {n} 行")
     else:
         print("\n（dry-run：加 --execute 才会修复并写 coverage 台账）")

@@ -52,6 +52,8 @@ EXPECTED_PER_DAY = {
     "funding": 3,      # 8h 结算；Hyperliquid 单独覆盖
 }
 FUNDING_PER_DAY = {"hyperliquid": 24}
+FUNDING_INTERVAL_H = {"hyperliquid": 1}
+DEFAULT_FUNDING_INTERVAL_H = 8
 
 # 数据可修复性：oi 只有这两家有历史接口（doc §15.2）
 OI_REPAIRABLE = set(OI_MAX_DAYS)
@@ -94,12 +96,23 @@ class GapDetector:
         gaps: list[Gap] = []
         for v in venues:
             for dt in data_types:
-                if dt == "kline":
-                    gaps += self._detect_table(v, "kline", days)
-                elif dt == "oi":
-                    gaps += self._detect_table(v, "oi", days)
-                elif dt == "funding":
-                    gaps += self._detect_funding(v, days)
+                for (code, d), e in self.grid(v, dt, days).items():
+                    if e["actual"] >= e["expected"]:
+                        continue
+                    repairable = self._repairable(v, dt, d)
+                    gaps.append(
+                        Gap(
+                            venue=v, data_type=dt, code=code, day=d,
+                            missing=e["expected"] - e["actual"], expected=e["expected"],
+                            repairable=repairable,
+                            reason=(
+                                f"疑似下架/停牌（最后一条 {e['hi']}，早于全所 {e['ceiling']}）"
+                                if e["delisted"]
+                                else ("" if repairable else self._why_lost(v, dt, d))
+                            ),
+                            rampup=e["delisted"] or e["rampup"],
+                        )
+                    )
         gaps += self._detect_stale(venues, days)
         return gaps
 
@@ -119,95 +132,73 @@ class GapDetector:
         )
         return {(r[0], r[1]): int(r[2]) for r in rows}
 
-    def _detect_table(self, venue: str, data_type: str, days: int) -> list[Gap]:
-        """按天对齐「应有根数」与「实际根数」。
+    def grid(self, venue: str, data_type: str, days: int) -> dict[tuple[str, date], dict[str, Any]]:
+        """每个 (code, 日) 的应有 / 实际根数。检测与台账共用同一份口径。
 
-        期望值的来源是【合约自己的首末 bar】而不是全局日期：
-        首日和当日天然不完整，用区间交集算，不搞「首尾日一律跳过」——
-        那样当天内部挖的洞（最常见：某小时同步失败）会被漏掉。
+        三个关键口径（都是实测踩出来的）：
+        - **参照时钟**：OI/funding 的应有根数由当天 K线根数决定（自身表删空就没边界）
+        - **上界用全所最晚 bar**：单合约停更时它自己的 max 也跟着后退，看不到洞
+        - **当日期望减 1 根**：交易所发布最后一根 bar 有几分钟延迟
         """
         table = DATA_TABLE[data_type]
         since = now_utc() - timedelta(days=days)
-        seen = self._daily_counts(venue, table, since)
+        actual = self._daily_counts(venue, table, since)
 
-        # ★ 参照时钟：K线。OI 快照 / funding 的「应有根数」由当天 K线根数决定，
-        #   不能从自身表取边界 —— okx OI 被删空后自身没有任何边界，整段洞会隐形。
-        if data_type == "kline":
-            ref_counts: dict[tuple[str, date], int] = seen
-            bounds = self._bounds(venue, table)
-        else:
-            ref_counts = self._daily_counts(
-                venue, DATA_TABLE["kline"], max(since, since if data_type == "kline" else since)
-            )
-            bounds = self._bounds(venue, DATA_TABLE["kline"])
-        now = now_utc()
-        this_hour = now.replace(minute=0, second=0, microsecond=0)
-        # ★ 采集起点：早于「本类数据第一行」的空白不是缺口，是还没开始采
         floor_row = self.store.query(
             f"SELECT min(datetime) FROM {self.store.database}.{table} WHERE venue = %(v)s",
             {"v": venue},
         )
         floor = _as_utc(floor_row[0][0]) if floor_row and floor_row[0][0] else since
 
-        # ★ 上界用「全所最晚 bar」：某合约单独停更（最常见）时，它自己的 hi
-        #   同时也是边界，区间内部一个洞都看不到 —— 这就是单合约尾部缺失的盲区。
+        if data_type == "kline":
+            ref = actual
+            bounds = self._bounds(venue, table)
+        else:
+            # 期望值用【当天真实 K线根数】，不能用 floor 截断：
+            # 截断会把「只采了 1 小时的首日」算成 ok，掩盖「该日 24 小时里只有 1 小时」的事实。
+            # 首日由 rampup 标注区分，不需要篡改期望值。
+            ref = self._daily_counts(venue, DATA_TABLE["kline"], since)
+            bounds = self._bounds(venue, DATA_TABLE["kline"])
+
         ceiling = max((h for _, h in bounds.values()), default=since)
-        out: list[Gap] = []
+        now = now_utc()
+        this_hour = now.replace(minute=0, second=0, microsecond=0)
+        today = this_hour.date()
+        interval = FUNDING_INTERVAL_H.get(venue, DEFAULT_FUNDING_INTERVAL_H)
+
+        out: dict[tuple[str, date], dict[str, Any]] = {}
         for code, (lo, hi) in bounds.items():
-            # 与全所最新差超过 24h：大概率已下架/停牌，不算同步故障
             delisted = (ceiling - hi) > timedelta(hours=24)
             d = max(lo.date(), since.date())
-            while d <= min(now_utc().date(), ceiling.date()):
-                day_start = max(
-                    lo, floor, datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-                )
-                if day_start >= datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(days=1):
-                    d += timedelta(days=1)
-                    continue
-                day_close = min(ceiling, datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-                                + timedelta(days=1) - timedelta(hours=1))
+            while d <= min(today, ceiling.date()):
+                day0 = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+                day_start = max(lo, floor, day0)
+                day_close = min(ceiling, day0 + timedelta(days=1) - timedelta(hours=1))
                 if data_type == "kline":
+                    if day_start > day_close:
+                        d += timedelta(days=1)
+                        continue
                     expected = int((day_close - day_start).total_seconds() // 3600) + 1
-                    # 当日只算已收盘的 bar
-                    if d == this_hour.date():
+                    if d == today:
                         expected = min(
                             expected,
                             max(0, int((this_hour - day_start).total_seconds() // 3600)),
                         )
-                        # 交易所发布最后一根 bar 有几分钟延迟，减 1 根容差，
-                        # 否则每次检查都会把「刚收盘还没发出来」误报成缺口
-                        expected = max(0, expected - 1)
+                        expected = max(0, expected - 1)   # 发布延迟容差
                 else:
-                    # 有 K线的小时才应该有 OI 快照；funding 再按结算周期折算
-                    n_ref = ref_counts.get((code, d), 0)
+                    n_ref = ref.get((code, d), 0)
                     if data_type == "funding":
-                        interval = 1 if venue == "hyperliquid" else 8
                         expected = max(1, n_ref // interval) if n_ref else 0
                     else:
                         expected = n_ref
-                actual = seen.get((code, d), 0)
-                if actual < expected:
-                    out.append(
-                        Gap(
-                            venue=venue,
-                            data_type=data_type,
-                            code=code,
-                            day=d,
-                            missing=expected - actual,
-                            expected=expected,
-                            repairable=self._repairable(venue, data_type, d),
-                            reason=(
-                                f"疑似下架/停牌（最后一条 {hi}，早于全所 {ceiling}）"
-                                if delisted
-                                else ("" if self._repairable(venue, data_type, d)
-                                      else self._why_lost(venue, data_type, d))
-                            ),
-                            rampup=(
-                                delisted
-                                or (data_type != "kline" and d == floor.date())
-                            ),
-                        )
-                    )
+                out[(code, d)] = {
+                    "expected": expected,
+                    "actual": actual.get((code, d), 0),
+                    "delisted": delisted,
+                    "rampup": data_type != "kline" and d == floor.date(),
+                    "hi": hi,
+                    "ceiling": ceiling,
+                }
                 d += timedelta(days=1)
         return out
 
@@ -249,35 +240,6 @@ class GapDetector:
                     )
         return out
 
-    def _detect_funding(self, venue: str, days: int) -> list[Gap]:
-        expected = FUNDING_PER_DAY.get(venue, EXPECTED_PER_DAY["funding"])
-        since = now_utc() - timedelta(days=days)
-        rows = self.store.query(
-            f"SELECT code, toDate(datetime) d, count() n FROM {self.store.database}.funding_rate "
-            f"WHERE venue = %(v)s AND datetime >= %(s)s GROUP BY code, d",
-            {"v": venue, "s": since},
-        )
-        seen = {(r[0], r[1]): int(r[2]) for r in rows}
-        bounds_rows = self.store.query(
-            f"SELECT code, min(datetime), max(datetime) FROM {self.store.database}.funding_rate "
-            f"WHERE venue = %(v)s GROUP BY code",
-            {"v": venue},
-        )
-        out: list[Gap] = []
-        for code, lo, hi in bounds_rows:
-            lo, hi = _as_utc(lo), _as_utc(hi)
-            d = max(since.date(), lo.date() + timedelta(days=1))
-            end = min(now_utc().date(), hi.date())
-            while d < end:
-                n = seen.get((code, d), 0)
-                # funding 允许 1 根的抖动（跨日归属）
-                if n < expected - 1:
-                    out.append(
-                        Gap(venue, "funding", code, d, expected - n, expected, True, "")
-                    )
-                d += timedelta(days=1)
-        return out
-
     def _repairable(self, venue: str, data_type: str, day: date) -> bool:
         if data_type != "oi":
             return True
@@ -296,51 +258,40 @@ class GapDetector:
     # ---------------- 台账 ----------------
 
     def write_coverage(
-        self, gaps: list[Gap], venues: list[str], days: int = 7
+        self, venues: list[str], days: int = 7, data_types: list[str] | None = None
     ) -> int:
-        """每 (venue, code, 日期) 一行，status=ok/gap/lost。"""
-        lost_keys = {
-            (g.venue, g.data_type, g.code, g.day) for g in gaps
-            if not g.repairable and g.code != "*"
-        }
-        gap_keys = {(g.venue, g.data_type, g.code, g.day) for g in gaps if g.code != "*"}
-        since = now_utc().date() - timedelta(days=days)
+        """每 (venue, data_type, code, 日) 一行：n_expected / n_actual / status。
+
+        status 语义（下游取数就靠这个判断，别再自己数行数）：
+          ok     完整，可直接用
+          gap    缺，但可补 → 等修复，不要当真实值
+          lost   永久缺失 → 该样本必须排除（**不能前值填充**）
+          rampup 采集首日 / 疑似下架 → 不是故障，按业务判断
+        """
+        data_types = data_types or ["kline", "funding", "oi"]
         out: list[dict[str, Any]] = []
+        checked = now_utc()
         for v in venues:
-            # 一次查出三类数据的每日计数
-            agg: dict[tuple[str, date], dict[str, int]] = defaultdict(dict)
-            for dt, table in (("kline", DATA_TABLE["kline"]), ("oi", DATA_TABLE["oi"]),
-                              ("funding", DATA_TABLE["funding"])):
-                rows = self.store.query(
-                    f"SELECT code, toDate(datetime) d, count() n FROM {self.store.database}.{table} "
-                    f"WHERE venue = %(v)s AND datetime >= %(s)s GROUP BY code, d",
-                    {"v": v, "s": since},
-                )
-                for code, d, n in rows:
-                    agg[(code, d)][dt] = int(n)
-            for (code, d), counts in agg.items():
-                status = "ok"
-                notes = []
-                for dt in ("kline", "oi", "funding"):
-                    if (v, dt, code, d) in lost_keys:
-                        status = "lost"
-                        notes.append(f"{dt} 永久缺失")
-                    elif (v, dt, code, d) in gap_keys and status == "ok":
-                        status = "gap"
-                        notes.append(f"{dt} 待修复")
-                out.append(
-                    {
-                        "venue": v,
-                        "code": code,
-                        "trade_date": d,
-                        "n_kline": min(counts.get("kline", 0), 24),
-                        "n_oi": min(counts.get("oi", 0), 24),
-                        "n_funding": min(counts.get("funding", 0), 24),
-                        "checked_at": now_utc(),
-                        "status": status,
-                        "note": "; ".join(notes),
-                    }
-                )
+            for dt in data_types:
+                for (code, d), e in self.grid(v, dt, days).items():
+                    if e["actual"] >= e["expected"]:
+                        status, note = "ok", ""
+                    elif e["delisted"]:
+                        status, note = "rampup", f"疑似下架/停牌（最后一条 {e['hi']}）"
+                    elif dt != "kline" and e["rampup"]:
+                        status, note = "rampup", "采集首日（此前未采集该类型）"
+                    elif self._repairable(v, dt, d):
+                        status, note = "gap", f"缺 {e['expected'] - e['actual']} 根，可修复"
+                    else:
+                        status, note = "lost", self._why_lost(v, dt, d)
+                    out.append(
+                        {
+                            "venue": v, "code": code, "data_type": dt, "trade_date": d,
+                            "n_expected": min(e["expected"], 65535),
+                            "n_actual": min(e["actual"], 65535),
+                            "status": status, "note": note, "checked_at": checked,
+                        }
+                    )
         if out:
             self.store.insert(TABLE_COVERAGE, out)
         return len(out)

@@ -106,13 +106,13 @@ COLUMNS: dict[str, list[str]] = {
     TABLE_COVERAGE: [
         "venue",
         "code",
+        "data_type",
         "trade_date",
-        "n_kline",
-        "n_oi",
-        "n_funding",
-        "checked_at",
+        "n_expected",
+        "n_actual",
         "status",
         "note",
+        "checked_at",
     ],
 }
 

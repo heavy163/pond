@@ -154,6 +154,10 @@ class CryptoStore:
     def write_sync_stat(self, stat: dict[str, Any]) -> None:
         self.insert("sync_stat", [stat])
 
+    def command(self, sql: str) -> None:
+        """执行 DDL / ALTER / CREATE VIEW 这类不返回结果集的语句。"""
+        self._client().command(sql)
+
     def finalize(self) -> None:
         for c in self._clients:
             try:

@@ -224,3 +224,40 @@ def test_lost_reason_is_explicit():
     today = dt.datetime.now(dt.timezone.utc).date()
     reason = d._why_lost("okx", "oi", today)
     assert "无历史接口" in reason and "永久" in reason
+
+
+# ---------------- 下游取数契约 ----------------
+
+
+def test_missing_hours_compress_to_ranges():
+    import datetime as dt
+
+    from pond.cryptos.quality import QualityGate
+
+    base = dt.datetime(2026, 10, 27, tzinfo=dt.timezone.utc)
+    hours = [base + dt.timedelta(hours=h) for h in (0, 1, 2, 5, 6, 10)]
+    got = QualityGate._compress(hours)
+    assert len(got) == 3
+    assert got[0] == (base, base + dt.timedelta(hours=3))
+    assert got[2] == (base + dt.timedelta(hours=10), base + dt.timedelta(hours=11))
+
+
+def test_kline_timestamp_column_is_open_time():
+    """K线的 datetime 是 close_time(xx:59:59.999)，跨表对齐必须用 open_time。"""
+    from pond.cryptos.quality import TS_COL
+
+    assert TS_COL["kline"] == "open_time"
+    assert TS_COL["oi"] == "datetime"
+    assert TS_COL["funding"] == "datetime"
+
+
+def test_oi_repairable_helper_matches_backfill_caps():
+    import datetime as dt
+
+    from pond.cryptos.quality import oi_repairable
+
+    today = dt.datetime.now(dt.timezone.utc).date()
+    assert oi_repairable("gate", today) is True
+    assert oi_repairable("gate", today - dt.timedelta(days=200)) is False
+    assert oi_repairable("bybit", today) is True
+    assert oi_repairable("okx", today) is False

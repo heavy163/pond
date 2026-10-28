@@ -1449,3 +1449,126 @@ SELECT venue, count() rows, min(trade_date) d0, max(trade_date) d1
 FROM cryptos.coverage FINAL WHERE status = 'lost'
 GROUP BY venue ORDER BY rows DESC;
 ```
+
+---
+
+## 19. 下游取数契约：完整性必须被查询，不能被推断
+
+### 19.1 为什么不能靠「有没有这行」判断
+
+下游最容易写错的一行代码：
+
+```python
+df = load("kline", venue, start, end)
+assert len(df) == 24 * days * len(codes)   # ❌ 必然误判
+```
+
+「行不存在」至少有四种含义，下游处理完全不同：
+
+| 情况 | 含义 | 下游该做什么 |
+|---|---|---|
+| 交易所那小时真没成交 | 正常（极少数） | 跳过该小时 |
+| 采集漏了，但可补 | 同步故障 | **等修复**，不要当真实值 |
+| 采集漏了，且不可补（6 家 OI） | 永久损失 | **样本标记不可用**，绝不能前值填充 |
+| 整家停更 | 管道宕机 | 整个窗口不可用 |
+
+`count()` 把这四者混成一个数字。**完整性只能从台账 + 参照时钟读出来。**
+
+### 19.2 三个入口
+
+**① SQL 视图（笔记本直接用）**
+
+```sql
+-- 每家每天每类数据的完整度
+SELECT * FROM cryptos.v_coverage_venue_day
+WHERE trade_date >= today() - 7 AND ok_ratio < 0.98
+ORDER BY trade_date DESC;
+
+-- 某个具体 (venue, code, 日) 到底缺什么
+SELECT * FROM cryptos.v_coverage_day
+WHERE venue = 'okx' AND code = 'BTC-USDT' AND trade_date >= today() - 7;
+```
+
+**② Python 门禁（因子管道用）**
+
+```python
+from pond.cryptos.quality import QualityGate, DataQualityError
+
+gate = QualityGate(store)
+q = gate.check("okx", data_type="kline", days=7, min_ratio=0.98)
+if not q.usable:
+    raise DataQualityError(q.reasons)     # 别在脏数据上算因子
+
+print(q.ratio, q.missing, q.lost, q.stale_hours)
+```
+
+**③ 行级标记（决定能不能前值填充）**
+
+```python
+rows = gate.row_flags("okx", "BTC-USDT", "kline", days=7)
+# [{'datetime': ..., 'present': True, 'lost': False}, ...]
+fillable = [r for r in rows if not r["present"] and not r["lost"]]
+```
+
+### 19.3 `status` 语义（下游就按这个分支）
+
+| status | 含义 | 下游动作 |
+|---|---|---|
+| `ok` | 完整 | 直接用 |
+| `gap` | 缺，但可补 | 等下一轮修复；**不要把它当真实值** |
+| `lost` | 永久缺失 | **排除该样本**；绝不能前值填充 |
+| `rampup` | 采集首日 / 疑似下架 | 不是故障，按业务判断 |
+
+`coverage` 按 **(venue, data_type, code, 日)** 记账——OI 丢了不代表 K 线丢了，
+必须能分开判断。这是踩过的坑：早先混成一行时，okx 的 OI 永久缺失会把 K 线也判成不可用。
+
+### 19.4 一个必须知道的字段陷阱
+
+**K 线的 `datetime` 是 `close_time`（`xx:59:59.999`），整点在 `open_time`。**
+OI / funding 的 `datetime` 就是整点。
+
+跨表对齐一律用 `open_time`：
+
+```sql
+-- ❌ 永远 join 不上，且不报错
+JOIN open_interest o ON o.datetime = k.datetime
+-- ✅
+JOIN open_interest o ON o.datetime = k.open_time
+```
+
+实测症状：OI 覆盖率恒显示 0%，但两表都有数据。`quality.py` 里用 `TS_COL` 统一了。
+
+### 19.5 完整性的时间性（研究可复现）
+
+同一个窗口，今天判定 `gap`，明天可能已被修复。所以：
+
+- 台账每行带 `checked_at`
+- 研究落档时必须记下取数时刻（`SELECT max(checked_at)` 或跑一次 `quality_report --json`）
+- 否则「昨天的样本里少了 3 小时」这件事无法复现
+
+### 19.6 实测（当前库）
+
+```
+kline     ok 528            # 8 家 × 33 码 × 2 天
+funding   ok 528
+oi        ok 326 / rampup 198 / lost 4
+```
+
+窗口级门禁（2 天）：
+
+| venue | K线 | OI |
+|---|---|---|
+| bybit / gate | ✓ 100% | ✓ 100%（有回灌历史） |
+| 其余 6 家 | ✓ 100% | ✗ 23~28%（OI 快照才刚上线） |
+
+这正是下游必须看到的差别：**同一家交易所，K 线可用不代表 OI 可用。**
+
+### 19.7 CLI
+
+```bash
+python scripts/quality_report.py --install-views        # 建视图（一次性）
+python scripts/quality_report.py --days 7 --data kline  # 门禁表，退出码 0/1
+python scripts/quality_report.py --venue okx --code BTC-USDT --rows --days 1
+```
+
+退出码：`0` 全部可用，`1` 有窗口不可用（CI / 因子管道可直接 `&&` 串联）。
