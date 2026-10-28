@@ -1,0 +1,180 @@
+# cryptos 采集配置
+#
+# 优先级：cryptos.venue_config（DB，运行时覆盖） > 本文件 > 代码默认值
+# 动态启停：往 venue_config 插一行 enabled=0，下一轮生效，无需重启容器。
+#
+# 限频初始值都是【保守的 50%】，上线后按响应头与 429 反馈再调。
+# 各所口径不同（weight/min vs req/2s），务必以官方文档为准逐所复核。
+
+global:
+  lookback_hours: 6          # 每轮回溯 6 小时，幂等重写（防漏 5 小时）
+  max_total_connections: 64  # 保护本机 FD/内存，不是 API 限额
+  round_budget_sec: 3300     # 一轮硬上限（周期 3600s）
+  # 现货只采「本所有对应永续合约」的对：没有合约无法对冲/做空，
+  # 对基差、carry、跨期类研究没有用处，白占配额。
+  # 纯现货所（upbit 无任何永续）不受影响，否则整所会被清空。
+  filter_spot_by_perp: true
+
+venues:
+  # Binance 关闭：生产库 quant.kline_futures_1h 已有其历史数据，不重复采集
+  binance:
+    enabled: false
+    concurrency: 8
+    deadline_sec: 3000       # 单所 50 分钟
+    timeout_sec: 15
+    max_retries: 3
+    data: [kline, funding, oi]   # spot / mark 按需打开
+    symbols:
+      include: []            # 子串匹配 raw symbol，如 [USDT] 或 [BTCUSDT, ETHUSDT]
+      exclude: [USDC, BUSD, "_"]
+      top_n: 0              # 0 = 不限；当前按字母序，P2 改按成交额排名
+    buckets:
+      # Binance USDT-M 官方 2400 weight/min，这里只用一半
+      default: {mode: weight, rate: 1200, window: 60, burst: 1.0}
+      kline:   {mode: weight, rate: 1200, window: 60, burst: 1.0}
+      # /futures/data/* 官方 1000 req/5min ≈ 3.3/s，取 2/s
+      oi:      {mode: requests, rate: 120, window: 60, burst: 2.0}
+      # fundingRate 计入 2400 weight/min，2/s 只占 5%
+      funding: {mode: requests, rate: 120, window: 60, burst: 2.0}
+      meta:    {mode: requests, rate: 10, window: 60, burst: 1.0}
+
+  # ================= 以下 8 家默认启用 =================
+  # 限频都是保守值（官方约 1/3~1/2），靠响应头与 429 反馈再调；口径各不相同。
+
+  okx:
+    enabled: true
+    concurrency: 8
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/2s
+      kline:   {mode: requests, rate: 15, window: 1, burst: 2.0}   # candles 40/2s
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 8, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  bybit:
+    enabled: true
+    concurrency: 8
+    data: [kline, funding, oi, spot]   # spot 走 category=spot，symbol 与永续同名
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 10, window: 1, burst: 1.0}   # 官方 120/5s
+      kline:   {mode: requests, rate: 12, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 8, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  gate:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi, spot]   # OI 有 180 天历史，四家里最深；spot 走 /spot/candlesticks
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 12, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 2, window: 1, burst: 1.0}    # contracts 单次 ~1.7s
+
+  bitget:
+    enabled: true
+    concurrency: 8
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/s
+      kline:   {mode: requests, rate: 12, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  kucoin:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}    # 官方 30/3s
+      kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}    # 单页仅 200 根
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 4, window: 1, burst: 1.0}
+
+  mexc:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 10, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 3, window: 1, burst: 1.0}
+
+  htx:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 2, window: 1, burst: 1.0}    # 单次 ~1.4s
+
+  hyperliquid:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi, spot]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      default: {mode: requests, rate: 3, window: 1, burst: 1.0}    # 官方 1200 weight/min
+      kline:   {mode: requests, rate: 3, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 3, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 2, window: 1, burst: 1.0}    # 每个 symbol 拉全量 ctx
+      meta:    {mode: requests, rate: 4, window: 1, burst: 1.0}
+
+  # 韩国第一大所（KRW 现货）。只取 KRW 市场：上币爆拉只发生在法币直连场景。
+  # 无 funding / OI（现货所），额外记 KRW/USD 汇率用于 Korea premium。
+  upbit:
+    enabled: true
+    concurrency: 5
+    data: [spot, fx]
+    symbols:
+      include: []
+      exclude: []
+      top_n: 0
+    buckets:
+      # 实测：2 req/s 连续 30 个请求仍偶发 1 次 429（官方 10/s 是峰值，
+      # 且 429 后进入惩罚状态）。降到 2/s、burst 1，299 个市场约 150s。
+      default: {mode: requests, rate: 2, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 2, window: 1, burst: 1.0}
+      fx:      {mode: requests, rate: 5, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 3, window: 1, burst: 1.0}

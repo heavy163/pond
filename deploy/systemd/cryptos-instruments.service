@@ -1,0 +1,21 @@
+[Unit]
+Description=cryptos 合约清单刷新（每日一次，新上架/下架合约）
+Documentation=file:///mnt/hgfs/e/workspace/FutureTradeDev/pond/doc/crypto_multivenue_sync.md
+RequiresMountsFor=/mnt/hgfs/e/workspace/FutureTradeDev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/hgfs/e/workspace/FutureTradeDev/pond
+# 只刷 instrument 表 + 顺带补最近 6 小时，不下载历史
+ExecStart=/usr/bin/bash scripts/cron_cryptos_sync.sh --refresh-instruments --lookback 2
+TimeoutStartSec=900
+MemoryMax=2G
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptos-instruments
+
+[Install]
+WantedBy=default.target

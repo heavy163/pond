@@ -1,0 +1,20 @@
+[Unit]
+Description=cryptos 数据完整性检查 + 缺口修复 + 覆盖度台账
+Documentation=file:///mnt/hgfs/e/workspace/FutureTradeDev/pond/doc/crypto_multivenue_sync.md
+RequiresMountsFor=/mnt/hgfs/e/workspace/FutureTradeDev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/hgfs/e/workspace/FutureTradeDev/pond
+ExecStart=/usr/bin/python3.12 scripts/check_gaps.py --days 7 --execute
+TimeoutStartSec=1800
+MemoryMax=2G
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptos-gapcheck
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,1 @@
+# Grafana 部署脚本的 token 从 ~/.hermes/secrets/grafana_token 读取，不入库

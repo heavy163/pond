@@ -1,0 +1,11 @@
+[Unit]
+Description=每日 00:05 刷新 cryptos 合约清单（避开 :02 的整轮同步）
+
+[Timer]
+OnCalendar=*-*-* 00:05:00
+Persistent=true
+AccuracySec=1min
+Unit=cryptos-instruments.service
+
+[Install]
+WantedBy=timers.target
