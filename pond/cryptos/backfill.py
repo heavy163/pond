@@ -28,6 +28,7 @@ from pond.cryptos.schema import (
     TABLE_BACKFILL,
     TABLE_FUNDING,
     TABLE_KLINE_FUT,
+    TABLE_KLINE_SPOT,
     TABLE_OI,
     now_utc,
 )
@@ -44,6 +45,7 @@ OI_MAX_DAYS: dict[str, int] = {
 
 DATA_TABLE = {
     "kline": TABLE_KLINE_FUT,
+    "spot": TABLE_KLINE_SPOT,
     "funding": TABLE_FUNDING,
     "oi": TABLE_OI,
 }
@@ -51,6 +53,7 @@ DATA_TABLE = {
 # 回灌时的数据类型 → adapter 方法
 FETCH = {
     "kline": lambda ad, raw, s, e: ad.kline(raw, s, e, market="perp"),
+    "spot": lambda ad, raw, s, e: ad.kline(raw, s, e, market="spot"),
     "funding": lambda ad, raw, s, e: ad.funding(raw, s, e),
     "oi": lambda ad, raw, s, e: ad.open_interest(raw, s, e),
 }

@@ -1732,3 +1732,35 @@ SELECT venue, count(), uniqExact(code), max(open_time)
 FROM cryptos.kline_spot_1h WHERE venue='upbit' GROUP BY venue;
 -- upbit  168  28  2026-10-28 01:00:00
 ```
+
+### 20.7 接入第 9 家时，完整性层暴露的 7 个口径 bug
+
+接入 Upbit 本来是"加一个适配器"，结果把 §18 那三层防线里最脏的问题全炸出来了。
+**这些 bug 在 8 家合约所上都不会显形**，因为它们的表结构刚好绕开了：
+
+| # | Bug | 症状 | 修法 |
+|---|---|---|---|
+| 1 | 用 `datetime` 算区间 | Upbit 表 `datetime` 是收盘时刻 `xx:59:59.999`，跨度少算 1 小时 → 23:00 的洞漏检 | K线类表统一用 `open_time`（`_ts()`） |
+| 2 | 时间参数按服务端时区解析 | 传 UTC datetime 被当成 Asia/Shanghai，窗口整体偏移 8 小时（`open_time >= since` 只剩 13/24 行） | 一律 `toUnixTimestamp(col) >= int(epoch)` |
+| 3 | `count()` 数物理行 | ReplacingMergeTree 有重复版本 → `n_actual` 27 > `n_expected` 24 | `uniqExact(时间列)` |
+| 4 | 窗口首日 `day_start` 不含 `since` | 期望 24 根、实际只统计 since 之后的 21 根 → 3 个假缺口 | `day_start = max(lo, floor, day0, since)` |
+| 5 | 今日容差无条件减 1 | 「昨天 23:00 有、今天 00:00 缺」被容差吃掉，漏检 | 只在「最近一小时还没出现 + 刚过整点 15 分钟内」才减 |
+| 6 | 不区分该所是否采集该类型 | Upbit 没有 funding，被要求每天交 3 条 → **56 条纯噪声 gap** | 按 `spec.data` 过滤 |
+| 7 | CLI `--data` 默认值不含 `spot` | 定时任务永远不写 spot 台账（静默漏掉一整类数据） | 默认值加 `spot` |
+
+**教训**：完整性检测的参照系一旦和数据本身同源（自己数自己），任何口径错误都会被
+"两边一起错"抵消掉，看起来永远是 0 缺口。上面 7 个里有 5 个都是这个模式——
+**0 缺口不等于完整，可能是检测器根本没在工作。**
+
+验证方法只有一个：**造洞**。删掉已知的 2 个小时，看它能不能检出来、能不能补回去。
+
+```bash
+# 造洞
+ALTER TABLE cryptos.kline_spot_1h DELETE
+WHERE venue='upbit' AND open_time IN ('2026-10-27 23:00:00','2026-10-28 00:00:00')
+# 检出（应报 28 码 × 2 小时 = 56）
+python scripts/check_gaps.py --venue upbit --days 1 --data spot
+# 修复 + 复查（应回到 0）
+python scripts/check_gaps.py --venue upbit --days 1 --data spot --execute
+```
+实测：56 检出 → 补回 756 行 → 复查 0 缺口 → 台账 28 码 × 24/24 ok。

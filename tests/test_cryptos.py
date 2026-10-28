@@ -320,3 +320,25 @@ def test_spot_venue_without_fx_returns_empty():
         dt.datetime(2026, 10, 28, tzinfo=utc), dt.datetime(2026, 10, 28, 1, tzinfo=utc)
     ))
     assert rows == []
+
+
+def test_kline_tables_use_open_time():
+    """K线表的 datetime 是收盘时刻（xx:59:59.999），算区间必须用 open_time。
+
+    这个口径错了会让「缺一小时」永远检不出来（实测踩过：00:00 的洞被漏检）。
+    """
+    from pond.cryptos.gaps import _ts
+    from pond.cryptos.schema import TABLE_FUNDING, TABLE_KLINE_FUT, TABLE_KLINE_SPOT
+
+    assert _ts(TABLE_KLINE_FUT) == "open_time"
+    assert _ts(TABLE_KLINE_SPOT) == "open_time"
+    assert _ts(TABLE_FUNDING) == "datetime"
+
+
+def test_spot_backfill_path_exists():
+    """现货也要能回灌，否则只有现货的所（Upbit）缺口永远修不了。"""
+    from pond.cryptos.backfill import DATA_TABLE, FETCH
+    from pond.cryptos.schema import TABLE_KLINE_SPOT
+
+    assert DATA_TABLE["spot"] == TABLE_KLINE_SPOT
+    assert "spot" in FETCH

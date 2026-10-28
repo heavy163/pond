@@ -33,7 +33,7 @@ from pond.cryptos.store import CryptoStore
 def parse_args():
     p = argparse.ArgumentParser(description="cryptos 数据完整性检查")
     p.add_argument("--venue", help="逗号分隔；默认全部 enabled")
-    p.add_argument("--data", default="kline,funding,oi")
+    p.add_argument("--data", default="kline,spot,funding,oi")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--no-repair", action="store_true", help="只检测不修复")
     p.add_argument("--execute", action="store_true", help="写库（修复数据 + coverage 台账）")

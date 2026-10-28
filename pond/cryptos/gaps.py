@@ -36,9 +36,21 @@ from loguru import logger
 
 from pond.cryptos.backfill import DATA_TABLE, FETCH, OI_MAX_DAYS
 from pond.cryptos.config import CryptosConfig
-from pond.cryptos.schema import TABLE_COVERAGE, now_utc
+from pond.cryptos.schema import (
+    TABLE_COVERAGE,
+    TABLE_KLINE_FUT,
+    TABLE_KLINE_SPOT,
+    now_utc,
+)
 from pond.cryptos.store import CryptoStore
 from pond.cryptos.venues.registry import make_adapter
+
+TS_COL = {TABLE_KLINE_FUT: "open_time", TABLE_KLINE_SPOT: "open_time"}
+
+
+def _ts(table: str) -> str:
+    return TS_COL.get(table, "datetime")
+
 
 def _as_utc(dt: datetime) -> datetime:
     """clickhouse_connect 对 DateTime64 有时返回 naive，统一成 UTC aware。"""
@@ -92,10 +104,14 @@ class GapDetector:
         self, venues: list[str] | None = None, data_types: list[str] | None = None, days: int = 7
     ) -> list[Gap]:
         venues = venues or [s.name for s in self.config.enabled_venues()]
-        data_types = data_types or ["kline", "funding", "oi"]
+        data_types = data_types or ["kline", "spot", "funding", "oi"]
         gaps: list[Gap] = []
         for v in venues:
-            for dt in data_types:
+            # 只检查该所**配置里真的采集**的数据类型。
+            # 否则 Upbit（spot+fx，没有 funding）会被要求每天交出 3 条资金费率，
+            # 产生 56 条纯噪声的 gap（实测踩过）。
+            allowed = set(self.config.get(v).data) if v in self.config.venues else None
+            for dt in [d for d in data_types if allowed is None or d in allowed]:
                 for (code, d), e in self.grid(v, dt, days).items():
                     if e["actual"] >= e["expected"]:
                         continue
@@ -116,19 +132,34 @@ class GapDetector:
         gaps += self._detect_stale(venues, days)
         return gaps
 
-    def _bounds(self, venue: str, table: str) -> dict[str, tuple[datetime, datetime]]:
+    def _ref_table(self, venue: str) -> str:
+        """非 K线数据的参照时钟：有合约 K线就用它，否则用现货 K线。
+
+        Upbit 这类只做现货的所，kline_futures 里一行都没有；如果固定用合约 K线
+        当参照，spot 的 OI/funding 类校验会认为"该所没有任何区间"，静默跳过。
+        """
         rows = self.store.query(
-            f"SELECT code, min(datetime), max(datetime) FROM {self.store.database}.{table} "
+            f"SELECT count() FROM {self.store.database}.{DATA_TABLE['kline']} "
+            f"WHERE venue = %(v)s",
+            {"v": venue},
+        )
+        return DATA_TABLE["kline"] if rows and rows[0][0] else DATA_TABLE["spot"]
+
+    def _bounds(self, venue: str, table: str) -> dict[str, tuple[datetime, datetime]]:
+        c = _ts(table)
+        rows = self.store.query(
+            f"SELECT code, min({c}), max({c}) FROM {self.store.database}.{table} "
             f"WHERE venue = %(v)s GROUP BY code",
             {"v": venue},
         )
         return {r[0]: (_as_utc(r[1]), _as_utc(r[2])) for r in rows}
 
     def _daily_counts(self, venue: str, table: str, since: datetime) -> dict[tuple[str, date], int]:
+        c = _ts(table)
         rows = self.store.query(
-            f"SELECT code, toDate(datetime) d, count() n FROM {self.store.database}.{table} "
-            f"WHERE venue = %(v)s AND datetime >= %(s)s GROUP BY code, d",
-            {"v": venue, "s": since},
+            f"SELECT code, toDate({c}) d, uniqExact({c}) n FROM {self.store.database}.{table} "
+            f"WHERE venue = %(v)s AND toUnixTimestamp({c}) >= %(s)s GROUP BY code, d",
+            {"v": venue, "s": int(since.timestamp())},
         )
         return {(r[0], r[1]): int(r[2]) for r in rows}
 
@@ -144,21 +175,23 @@ class GapDetector:
         since = now_utc() - timedelta(days=days)
         actual = self._daily_counts(venue, table, since)
 
+        c = _ts(table)
         floor_row = self.store.query(
-            f"SELECT min(datetime) FROM {self.store.database}.{table} WHERE venue = %(v)s",
+            f"SELECT min({c}) FROM {self.store.database}.{table} WHERE venue = %(v)s",
             {"v": venue},
         )
         floor = _as_utc(floor_row[0][0]) if floor_row and floor_row[0][0] else since
 
-        if data_type == "kline":
+        if data_type in ("kline", "spot"):
             ref = actual
             bounds = self._bounds(venue, table)
         else:
             # 期望值用【当天真实 K线根数】，不能用 floor 截断：
             # 截断会把「只采了 1 小时的首日」算成 ok，掩盖「该日 24 小时里只有 1 小时」的事实。
             # 首日由 rampup 标注区分，不需要篡改期望值。
-            ref = self._daily_counts(venue, DATA_TABLE["kline"], since)
-            bounds = self._bounds(venue, DATA_TABLE["kline"])
+            ref_tbl = self._ref_table(venue)
+            ref = self._daily_counts(venue, ref_tbl, since)
+            bounds = self._bounds(venue, ref_tbl)
 
         ceiling = max((h for _, h in bounds.values()), default=since)
         now = now_utc()
@@ -172,9 +205,9 @@ class GapDetector:
             d = max(lo.date(), since.date())
             while d <= min(today, ceiling.date()):
                 day0 = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-                day_start = max(lo, floor, day0)
+                day_start = max(lo, floor, day0, since)   # 窗口首日只从 since 起算
                 day_close = min(ceiling, day0 + timedelta(days=1) - timedelta(hours=1))
-                if data_type == "kline":
+                if data_type in ("kline", "spot"):
                     if day_start > day_close:
                         d += timedelta(days=1)
                         continue
@@ -184,7 +217,12 @@ class GapDetector:
                             expected,
                             max(0, int((this_hour - day_start).total_seconds() // 3600)),
                         )
-                        expected = max(0, expected - 1)   # 发布延迟容差
+                        # 发布延迟容差只在"最近一个已收盘小时还没出现、且刚过整点"时生效。
+                        # 无条件减 1 会把「昨天最后一根有、今天 00:00 缺」这种洞也一起吃掉
+                        # （实测：删掉 upbit 的 23:00 与 00:00 两行，00:00 漏检）。
+                        last_closed = this_hour - timedelta(hours=1)
+                        if ceiling < last_closed and (now - this_hour) < timedelta(minutes=15):
+                            expected = max(0, expected - 1)
                 else:
                     n_ref = ref.get((code, d), 0)
                     if data_type == "funding":
@@ -195,7 +233,7 @@ class GapDetector:
                     "expected": expected,
                     "actual": actual.get((code, d), 0),
                     "delisted": delisted,
-                    "rampup": data_type != "kline" and d == floor.date(),
+                    "rampup": data_type not in ("kline", "spot") and d == floor.date(),
                     "hi": hi,
                     "ceiling": ceiling,
                 }
@@ -212,7 +250,7 @@ class GapDetector:
         out: list[Gap] = []
         now = now_utc()
         for v in venues:
-            for dt in ("kline", "oi", "funding"):
+            for dt in ("kline", "spot", "oi", "funding"):
                 table = DATA_TABLE[dt]
                 r = self.store.query(
                     f"SELECT max(datetime), count() FROM {self.store.database}.{table} "
@@ -268,17 +306,18 @@ class GapDetector:
           lost   永久缺失 → 该样本必须排除（**不能前值填充**）
           rampup 采集首日 / 疑似下架 → 不是故障，按业务判断
         """
-        data_types = data_types or ["kline", "funding", "oi"]
+        data_types = data_types or ["kline", "spot", "funding", "oi"]
         out: list[dict[str, Any]] = []
         checked = now_utc()
         for v in venues:
-            for dt in data_types:
+            allowed = set(self.config.get(v).data) if v in self.config.venues else None
+            for dt in [d for d in data_types if allowed is None or d in allowed]:
                 for (code, d), e in self.grid(v, dt, days).items():
                     if e["actual"] >= e["expected"]:
                         status, note = "ok", ""
                     elif e["delisted"]:
                         status, note = "rampup", f"疑似下架/停牌（最后一条 {e['hi']}）"
-                    elif dt != "kline" and e["rampup"]:
+                    elif dt not in ("kline", "spot") and e["rampup"]:
                         status, note = "rampup", "采集首日（此前未采集该类型）"
                     elif self._repairable(v, dt, d):
                         status, note = "gap", f"缺 {e['expected'] - e['actual']} 根，可修复"

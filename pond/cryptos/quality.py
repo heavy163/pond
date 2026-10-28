@@ -89,7 +89,7 @@ class WindowQuality:
 
 # ★ K线的 datetime 是 close_time（xx:59:59.999），整点在 open_time。
 #   OI / funding 的 datetime 就是整点。跨表对齐必须统一到 open_time。
-TS_COL = {"kline": "open_time", "oi": "datetime", "funding": "datetime"}
+TS_COL = {"kline": "open_time", "spot": "open_time", "oi": "datetime", "funding": "datetime"}
 
 
 class QualityGate:
@@ -100,6 +100,15 @@ class QualityGate:
         self.config = config or CryptosConfig.load(None)
 
     # ---------------- 窗口级门禁 ----------------
+
+    def _ref_table(self, venue: str) -> str:
+        """非 K线数据用哪个表当时钟：优先合约 K线，没有就用现货 K线（Upbit）。"""
+        rows = self.store.query(
+            f"SELECT count() FROM {self.store.database}.{DATA_TABLE['kline']} "
+            f"WHERE venue = %(v)s",
+            {"v": venue},
+        )
+        return DATA_TABLE["kline"] if rows and rows[0][0] else DATA_TABLE["spot"]
 
     def check(
         self,
@@ -117,23 +126,23 @@ class QualityGate:
         q = WindowQuality(venue=venue, data_type=data_type, start=start, end=end)
 
         # 参照时钟：K线（OI/funding 的应有小时由 K线决定）
-        ref_table = table if data_type == "kline" else DATA_TABLE["kline"]
+        ref_table = table if data_type in ("kline", "spot") else self._ref_table(venue)
         where_code = ""
-        params: dict[str, Any] = {"v": venue, "s": start, "e": end}
+        params: dict[str, Any] = {"v": venue, "s": int(start.timestamp()), "e": int(end.timestamp())}
         if codes:
             where_code = " AND code IN %(codes)s"
             params["codes"] = tuple(codes)
 
-        ref_ts = TS_COL["kline"] if data_type != "kline" else TS_COL[data_type]
+        ref_ts = TS_COL["kline"] if data_type not in ("kline", "spot") else TS_COL[data_type]
         act_ts = TS_COL[data_type]
         ref_rows = self.store.query(
             f"SELECT code, {ref_ts} FROM {self.store.database}.{ref_table} "
-            f"WHERE venue = %(v)s AND {ref_ts} >= %(s)s AND {ref_ts} < %(e)s{where_code}",
+            f"WHERE venue = %(v)s AND toUnixTimestamp({ref_ts}) >= %(s)s AND toUnixTimestamp({ref_ts}) < %(e)s{where_code}",
             params,
         )
         actual_rows = self.store.query(
             f"SELECT code, {act_ts} FROM {self.store.database}.{table} "
-            f"WHERE venue = %(v)s AND {act_ts} >= %(s)s AND {act_ts} < %(e)s{where_code}",
+            f"WHERE venue = %(v)s AND toUnixTimestamp({act_ts}) >= %(s)s AND toUnixTimestamp({act_ts}) < %(e)s{where_code}",
             params,
         )
 
@@ -208,18 +217,18 @@ class QualityGate:
         table = DATA_TABLE[data_type]
         end = now_utc().replace(minute=0, second=0, microsecond=0)
         start = end - timedelta(days=days)
-        ref_table = table if data_type == "kline" else DATA_TABLE["kline"]
+        ref_table = table if data_type in ("kline", "spot") else self._ref_table(venue)
         ref_ts = TS_COL["kline"]
         act_ts = TS_COL[data_type]
         ref = self.store.query(
             f"SELECT {ref_ts} FROM {self.store.database}.{ref_table} "
-            f"WHERE venue = %(v)s AND code = %(c)s AND {ref_ts} >= %(s)s AND {ref_ts} < %(e)s",
-            {"v": venue, "c": code, "s": start, "e": end},
+            f"WHERE venue = %(v)s AND code = %(c)s AND toUnixTimestamp({ref_ts}) >= %(s)s AND toUnixTimestamp({ref_ts}) < %(e)s",
+            {"v": venue, "c": code, "s": int(start.timestamp()), "e": int(end.timestamp())},
         )
         act = self.store.query(
             f"SELECT {act_ts} FROM {self.store.database}.{table} "
-            f"WHERE venue = %(v)s AND code = %(c)s AND {act_ts} >= %(s)s AND {act_ts} < %(e)s",
-            {"v": venue, "c": code, "s": start, "e": end},
+            f"WHERE venue = %(v)s AND code = %(c)s AND toUnixTimestamp({act_ts}) >= %(s)s AND toUnixTimestamp({act_ts}) < %(e)s",
+            {"v": venue, "c": code, "s": int(start.timestamp()), "e": int(end.timestamp())},
         )
         have = {_as_utc(r[0]) for r in act}
         lost_days = {
