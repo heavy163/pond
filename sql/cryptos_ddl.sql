@@ -199,3 +199,18 @@ ORDER BY (venue, window_start);
 -- CREATE USER IF NOT EXISTS cryptos_reader IDENTIFIED BY '<pwd>'
 --   SETTINGS max_memory_usage = 8000000000, max_concurrent_queries_for_user = 16;
 -- GRANT SELECT ON cryptos.* TO cryptos_reader;
+
+-- 汇率快照：目前只有 Upbit 提供 KRW/USD（1 base = rate quote）。
+-- 用途：Korea premium = (Upbit KRW 价 / rate) / 全球所 USDT 价 - 1。
+CREATE TABLE IF NOT EXISTS cryptos.fx_rate
+(
+    datetime     DateTime64(3, 'UTC'),
+    base         LowCardinality(String),
+    quote        LowCardinality(String),
+    rate         Float64,
+    source       LowCardinality(String),
+    ingested_at  DateTime64(3, 'UTC')
+)
+ENGINE = ReplacingMergeTree(ingested_at)
+PARTITION BY toYYYYMM(datetime)
+ORDER BY (base, quote, datetime);

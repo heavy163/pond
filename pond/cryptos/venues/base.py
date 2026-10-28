@@ -188,6 +188,12 @@ class VenueAdapter(ABC):
     ) -> list[dict[str, Any]]:
         """持仓量历史（窗口极短，错过不可再生）。"""
 
+    async def fx_rates(
+        self, start, end, base: str = "USD", quote: str = "KRW"
+    ) -> list[dict]:
+        """汇率（默认无）。只有需要法币换算的所实现。"""
+        return []
+
     async def mark_price(
         self, raw_code: str, start: datetime, end: datetime
     ) -> list[dict[str, Any]]:

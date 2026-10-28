@@ -16,6 +16,7 @@ TABLE_KLINE_SPOT = "kline_spot_1h"
 TABLE_FUNDING = "funding_rate"
 TABLE_OI = "open_interest"
 TABLE_MARK = "mark_price"
+TABLE_FX = "fx_rate"
 TABLE_COVERAGE = "coverage"
 TABLE_BACKFILL = "backfill_job"
 TABLE_VENUE_CONFIG = "venue_config"
@@ -103,6 +104,14 @@ COLUMNS: dict[str, list[str]] = {
         "err",
         "updated_at",
     ],
+    TABLE_FX: [
+        "datetime",
+        "base",
+        "quote",
+        "rate",
+        "source",
+        "ingested_at",
+    ],
     TABLE_COVERAGE: [
         "venue",
         "code",
@@ -123,6 +132,7 @@ TIME_COLUMN = {
     TABLE_FUNDING: "datetime",
     TABLE_OI: "datetime",
     TABLE_MARK: "datetime",
+    TABLE_FX: "datetime",
 }
 
 

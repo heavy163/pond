@@ -1641,3 +1641,94 @@ gate  kline 100.00% ✓        oi 100.00% ✓（有 179 天回灌）
 
 推荐先做「采集端拒绝交付」：它把判断力放在唯一一个所有人都必须经过的地方（同步出口），
 而不是分散到 N 个下游。**这条目前还没做**，是本设计已知的最后一个缺口。
+
+---
+
+## 20. 韩国交易所：Upbit 接入（第 9 家）
+
+> 完整研究见 notebook：`report/manual/korea_exchange_study/korea_exchange_study.ipynb`
+> （数字全部由 `scripts/collect_facts.py` 实测写入 `data/facts.json`，notebook 逐值断言）
+
+### 20.1 结论：只有 Upbit 有"上币爆拉"
+
+实测 24h KRW 成交额（2026-10-28）：
+
+| 交易所 | KRW 市场 | 24h 成交额 | 份额 | 单市场深度 |
+|---|---|---|---|---|
+| **Upbit** | 299 | **$904M** | **62.3%** | **$2.99M** |
+| Bithumb | 489 | $411M | 28.5% | $0.84M |
+| Coinone | 359 | $125M | 8.7% | $0.35M |
+| Gopax | 254 | $7.5M | 0.5% | $0.03M |
+| digitalX（原 Korbit） | — | 接口部分 503 | — | — |
+
+上币爆拉 = 薄订单簿 × 集中买盘。单市场深度决定订单簿多薄：Upbit 是新币开盘挂单只有
+几十万美元而日成交 $3M；Gopax 全所一天 $7.5M，买盘全涌向一个币也推不动。
+
+**Korbit ≡ digitalX**：未来资产 2026-07 收购 97.15%，08-11 改法人名，**09-16 域名与 App 全部切换**。
+`api.korbit.co.kr` 现在 301 到 `lightning.digitalx.miraeasset.com`。
+
+### 20.2 上币效应实测（NIL，2026-10-27 16:40 KST）
+
+| 时点 | Upbit（折USD） | Bybit | 溢价 |
+|---|---|---|---|
+| 开盘 | $0.1187 | $0.1072 | **+10.76%** |
+| 首根收盘 | — | — | +3.79% |
+| 第 10 分钟 | — | — | **−0.37%** |
+| 第 60 分钟 | — | — | +0.24% |
+| 第 116 分钟 | $0.0993 | — | — |
+
+首分钟成交 8.30B KRW（$6.2M），首小时 41.29B KRW（$30.8M）。
+**溢价窗口 ≈ 10 分钟**，同期全球所只涨 1.8~2.3%。
+
+**结论：这是本地流动性事件，不是重新定价；需要韩国实名 KRW 账户，外部资金无法参与。**
+第三方统计显示效应本身在衰减（2026H1 首日中位 +42% → 6/15 后 +10%，
+因为 Upbit 成交量 YTD −70%，交易所靠加速上币救量）。
+
+### 20.3 接入口径
+
+| 项 | 决策 | 理由 |
+|---|---|---|
+| 市场 | 只取 KRW（299 中选 28 主流） | 上币效应只在法币直连市场 |
+| 数据类型 | `spot` + `fx` | 现货所无 funding/OI；额外记 KRW/USD |
+| code | `BTC-KRW`（raw `KRW-BTC`） | 沿用 BASE-QUOTE 约定 |
+| 汇率 | `/v1/ticker?markets=KRW-USDT` 每小时 1 条 | Upbit 无汇率历史接口，只能逐时累积 |
+| 限频 | 8 req/s（官方 10） | 留 1/3 余量 |
+
+**`fx` 是新增数据类型**：不是每个 symbol 一条，而是每个交易所一条，
+所以 `_sync_type` 里特判、只调一次；`VenueAdapter.fx_rates()` 默认返回 `[]`。
+
+新表 `cryptos.fx_rate(datetime, base, quote, rate, source, ingested_at)`。
+
+### 20.4 落地时踩到的坑
+
+1. **`instrument.listed_at` 非 Nullable** — Upbit 不提供上市时间，传 `None` 直接崩在
+   clickhouse_connect 的 temporal writer（`'NoneType' object has no attribute 'timestamp'`）。
+   已 ALTER 为 `Nullable(DateTime64)`：**未知就是 NULL，不编造时间**。
+2. **`instrument` 需要 `multiplier`** — 现货补 1.0。
+3. **dry-run 不校验行 schema** — dry-run 不写库，所以缺列问题只有 `--execute` 才暴露。
+   这是测试缺口：应该在 `validate_rows` 阶段就校验。
+4. **`top_n` 按字母序取是错的** — 8 家合约所原来是 AAVE/ADA/AERO/AGLD…
+   与 Upbit 的 30 个主流币**只有 1 个交集**，Korea premium 根本算不出来。
+   已把 9 家统一为同一份 30 个主流币清单；`top_n` 本身仍应按 `quote_volume` 排名（未做）。
+
+### 20.5 Korea premium（真正有用的部分）
+
+```
+Korea premium = (Upbit KRW 价 / KRW_USD) / 全球所 USDT 价 − 1
+```
+
+实测（26 币，最新共同小时）：**中位 +12 bp、均值 +17 bp**，BTC 仅 **+7 bp**，
+小币最高（DOGE +93 bp / ADA +42 bp）。大币被全球套利压平，小币反映本地散户需求。
+
+这是现有 8 家数据做不出来的因子，但**样本量远远不够**（26 币 × 数小时）：
+要 3 个月（约 5.6 万观测）才有资格算 IC。**在此之前不做任何因子结论。**
+
+### 20.6 端到端结果
+
+9 家一轮：全部 `synced`，Upbit 28 码 / 168 行 / **4.5 秒**（占整轮 <3%）。
+
+```sql
+SELECT venue, count(), uniqExact(code), max(open_time)
+FROM cryptos.kline_spot_1h WHERE venue='upbit' GROUP BY venue;
+-- upbit  168  28  2026-10-28 01:00:00
+```

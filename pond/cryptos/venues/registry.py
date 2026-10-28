@@ -10,6 +10,7 @@ from pond.cryptos.venues.bybit import BybitAdapter
 from pond.cryptos.venues.gate import GateAdapter
 from pond.cryptos.venues.htx import HtxAdapter
 from pond.cryptos.venues.hyperliquid import HyperliquidAdapter
+from pond.cryptos.venues.upbit import UpbitAdapter
 from pond.cryptos.venues.kucoin import KucoinAdapter
 from pond.cryptos.venues.mexc import MexcAdapter
 from pond.cryptos.venues.okx import OkxAdapter
@@ -25,6 +26,7 @@ ADAPTERS: dict[str, type[VenueAdapter]] = {
     "mexc": MexcAdapter,
     "htx": HtxAdapter,
     "hyperliquid": HyperliquidAdapter,
+    "upbit": UpbitAdapter,
 }
 
 

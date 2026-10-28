@@ -261,3 +261,62 @@ def test_oi_repairable_helper_matches_backfill_caps():
     assert oi_repairable("gate", today - dt.timedelta(days=200)) is False
     assert oi_repairable("bybit", today) is True
     assert oi_repairable("okx", today) is False
+
+
+# ---------------- Upbit（韩国，第 9 家）----------------
+
+
+def test_upbit_registered():
+    from pond.cryptos.venues.registry import available_venues
+
+    assert "upbit" in available_venues()
+    assert "binance" in available_venues()      # 保留但配置里 disabled
+
+
+def test_fx_is_known_data_type():
+    from pond.cryptos.config import DATA_TYPES
+    from pond.cryptos.schema import TABLE_FX
+    from pond.cryptos.sync import DATA_TABLE
+
+    assert "fx" in DATA_TYPES
+    assert DATA_TABLE["fx"] == TABLE_FX == "fx_rate"
+
+
+def test_fx_columns_complete():
+    from pond.cryptos.schema import COLUMNS, TABLE_FX
+
+    assert set(COLUMNS[TABLE_FX]) == {
+        "datetime", "base", "quote", "rate", "source", "ingested_at"
+    }
+
+
+def test_spot_venue_without_fx_returns_empty():
+    """没有汇率接口的所必须返回空列表，而不是抛 AttributeError。"""
+    import asyncio
+    import datetime as dt
+
+    from pond.cryptos.venues.base import VenueAdapter
+
+    class _Bare(VenueAdapter):
+        name = "bare"
+        BASE = "http://127.0.0.1"
+
+        async def instruments(self):
+            return []
+
+        async def kline(self, raw_code, start, end, market="perp"):
+            return []
+
+        async def funding(self, raw_code, start, end):
+            return []
+
+        async def open_interest(self, raw_code, start, end):
+            return []
+
+    from pond.cryptos.config import VenueSpec
+
+    utc = dt.timezone.utc
+    rows = asyncio.run(_Bare(spec=VenueSpec(name="bare")).fx_rates(
+        dt.datetime(2026, 10, 28, tzinfo=utc), dt.datetime(2026, 10, 28, 1, tzinfo=utc)
+    ))
+    assert rows == []

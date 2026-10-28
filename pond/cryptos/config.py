@@ -20,7 +20,7 @@ from loguru import logger
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "cryptos.yaml"
 
-DATA_TYPES = ("kline", "spot", "funding", "oi", "mark")
+DATA_TYPES = ("kline", "spot", "funding", "oi", "mark", "fx")
 BUCKET_MODES = ("requests", "weight")
 
 

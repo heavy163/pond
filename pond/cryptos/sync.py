@@ -33,6 +33,7 @@ from pond.cryptos.schema import (
     TABLE_KLINE_FUT,
     TABLE_KLINE_SPOT,
     TABLE_MARK,
+    TABLE_FX,
     TABLE_OI,
     now_utc,
 )
@@ -45,6 +46,7 @@ DATA_TABLE = {
     "funding": TABLE_FUNDING,
     "oi": TABLE_OI,
     "mark": TABLE_MARK,
+    "fx": TABLE_FX,
 }
 
 
@@ -242,6 +244,14 @@ class CryptoHelper:
         res: VenueResult,
     ) -> int:
         table = DATA_TABLE[dtype]
+
+        # fx 是"每个交易所一条汇率"，不是每个 symbol 一条 → 只调一次
+        if dtype == "fx":
+            rows = await ad.fx_rates(start, end)
+            if rows and not self.dry_run:
+                await asyncio.to_thread(self.store.insert, table, rows)
+            return len(rows)
+
         fn = self._fetcher(ad, dtype)
         sem = asyncio.Semaphore(spec.concurrency)
         total = 0
