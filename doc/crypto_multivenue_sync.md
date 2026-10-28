@@ -1410,7 +1410,17 @@ L2/L3 已实现：`pond/cryptos/gaps.py` + `scripts/check_gaps.py` + `cryptos-ga
 ✗ 永久  okx/oi/BTC-USDT 2026-10-27: okx 只提供当前 OI，无历史接口 → 该日 OI 永久不可恢复
 ```
 
-`coverage` 台账实测：872 行 `ok`、1 行 `gap`、202 行 `lost`（`lost` 全部来自 6 家快照所的上线首日）。
+`coverage` 台账实测（按 data_type 记账后的口径）：
+
+| data_type | ok | gap | lost | rampup |
+|---|---|---|---|---|
+| kline | 528 | 0 | 0 | 0 |
+| funding | 528 | 0 | 0 | 0 |
+| oi | 326 | 0 | 4 | 198 |
+
+`rampup` 198 = 6 家快照所在**上线首日**只有 1 小时 OI（不是故障）；
+`lost` 4 = kucoin/mexc 有 4 个 (code, 日) 当天完全没有 OI 快照。
+注意台账必须是**按类型**的：早先混成一行的写法会让 okx 的 OI 缺失把它的 K线也判成不可用。
 
 ### 18.5 每日 00:20 做什么
 
@@ -1437,17 +1447,22 @@ scripts/check_gaps.py --days 7 --execute
 ### 18.7 运维查询
 
 ```sql
--- 最近 7 天哪些 (venue, code, 日) 不完整
-SELECT venue, code, trade_date, n_kline, n_oi, n_funding, status, note
+-- 最近 7 天哪些 (venue, data_type, code, 日) 不完整
+SELECT venue, data_type, code, trade_date, n_expected, n_actual, status, note
 FROM cryptos.coverage FINAL
-WHERE trade_date >= today() - 7 AND status != 'ok'
-ORDER BY trade_date DESC, venue, code
+WHERE trade_date >= today() - 7 AND status NOT IN ('ok')
+ORDER BY status = 'lost' DESC, trade_date DESC, venue, code
 LIMIT 50;
 
 -- 永久丢失的清单（下游必须排除这些样本）
-SELECT venue, count() rows, min(trade_date) d0, max(trade_date) d1
+SELECT venue, data_type, count() rows, min(trade_date) d0, max(trade_date) d1
 FROM cryptos.coverage FINAL WHERE status = 'lost'
-GROUP BY venue ORDER BY rows DESC;
+GROUP BY venue, data_type ORDER BY rows DESC;
+
+-- 平台级体检：每家每天每类数据的完整率
+SELECT * FROM cryptos.v_coverage_venue_day
+WHERE trade_date >= today() - 7 AND ok_ratio < 0.98
+ORDER BY trade_date DESC, venue, data_type;
 ```
 
 ---
@@ -1572,3 +1587,57 @@ python scripts/quality_report.py --venue okx --code BTC-USDT --rows --days 1
 ```
 
 退出码：`0` 全部可用，`1` 有窗口不可用（CI / 因子管道可直接 `&&` 串联）。
+
+### 19.8 一个完整例子（因子取数前）
+
+```python
+from pond.cryptos.quality import QualityGate, DataQualityError
+from pond.cryptos.store import CryptoStore
+
+store = CryptoStore.from_env()
+gate = QualityGate(store)
+
+CODES = [...]           # 你的宇宙
+start, end = "2026-10-01", "2026-10-27"
+
+for venue in ["okx", "bybit", "gate", "bitget"]:
+    q = gate.check(venue, data_type="kline", days=27, min_ratio=0.99)
+    if not q.usable:
+        print(f"跳过 {venue}: {q.reasons}")
+        continue
+
+    # 注意用 open_time 对齐（不是 datetime）
+    df = store.query(f"""
+        SELECT venue, code, open_time, close, volume
+        FROM cryptos.kline_futures_1h
+        WHERE venue = '{venue}' AND open_time >= '{start}' AND open_time < '{end}'
+    """)
+
+    # OI 单独的可用性判断：同一家可能 K线可用、OI 不可用
+    q_oi = gate.check(venue, data_type="oi", days=27, allow_lost=False)
+    if not q_oi.usable:
+        print(f"{venue} OI 不可用于长窗：{q_oi.reasons} → OI 因子只用短窗")
+```
+
+输出的不确定性是**可以量化的**，不是"大概能跑"：
+
+```
+okx   kline 100.00% ✓        oi  23.48% ✗（快照才上线）
+bybit kline 100.00% ✓        oi 100.00% ✓（有 7 天回灌）
+gate  kline 100.00% ✓        oi 100.00% ✓（有 179 天回灌）
+```
+
+### 19.9 强制力从哪来（目前没有，必须自己接）
+
+这套契约只**提供能力**，不构成强制。当前 `cryptos` 库刚建好，**还没有任何 crypto 因子在生产上读它**——
+所以"没人检查"就是现实风险：「看起来成功的脏批次」比失败的批次危险得多。
+
+两条可选的强制路径：
+
+| 路径 | 做法 | 强度 |
+|---|---|---|
+| **采集端拒绝交付** | `venue_config` 加 `min_coverage`，每轮算完写 `sync_stat.coverage_ok`；低于阈值标 `partial` 且**不发 MQTT 完成事件** | 强，下游不检查也拿不到"成功"信号 |
+| 因子端前置断言 | 取数第一行 `gate.assert_usable(...)`，不通过直接 raise | 中，取决于每个下游是否老实写 |
+
+推荐先做「采集端拒绝交付」：它把判断力放在唯一一个所有人都必须经过的地方（同步出口），
+而不是分散到 N 个下游。**这条目前还没做**，是本设计已知的最后一个缺口。
