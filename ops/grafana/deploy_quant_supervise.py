@@ -142,19 +142,36 @@ GROUP BY toStartOfDay(t) ORDER BY time"""
 
 # 三台机器的本金差一个数量级（约 2.7k / 4.2k / 25k），直接画原值小账户会被压成直线。
 # 归一化到窗口起点 = 100，才是可比口径；绝对规模另开一个合计面板。
+# ⚠️ 多实体不能靠「一个字符串标签列」：ClickHouse 插件不会按标签拆 frame，
+# 983 行会被画成一条线（三台机器的值交错），看起来就是上蹿下跳。
+# 必须把每台机器透视成独立数值列，才对得上时间轴。
 SQL_WALLET = f"""
 WITH w AS (
-    SELECT datetime AS time, machine, value
+    SELECT machine, toStartOfHour(datetime) AS h, argMax(value, datetime) AS v
     FROM quant.future_wallet
     WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
+    GROUP BY machine, h
 ),
-b AS (SELECT machine, argMin(value, time) AS base FROM w GROUP BY machine)
-SELECT w.time AS time, w.machine AS "机器", w.value / b.base * 100 AS "净值(起点=100)"
-FROM w INNER JOIN b USING (machine)
-ORDER BY time"""
+b AS (SELECT machine, argMin(v, h) AS base FROM w GROUP BY machine),
+grid AS (
+    SELECT hours.h AS h, machines.machine AS machine
+    FROM (SELECT DISTINCT h FROM w) AS hours
+    CROSS JOIN (SELECT DISTINCT machine FROM w) AS machines
+)
+SELECT f.h AS time,
+       round(maxIf(f.v / f.base * 100, f.machine LIKE '%43.153.152.139%'), 2) AS "43.153 (30k)",
+       round(maxIf(f.v / f.base * 100, f.machine LIKE '%43.133.207.73%'), 2) AS "43.133 (4.5k)",
+       round(maxIf(f.v / f.base * 100, f.machine LIKE '%43.167.224.202%'), 2) AS "43.167 (3k)"
+FROM (
+    SELECT g.h AS h, g.machine AS machine, w2.v AS v, b.base AS base
+    FROM grid AS g
+    ASOF LEFT JOIN w AS w2 ON g.machine = w2.machine AND g.h >= w2.h
+    INNER JOIN b ON b.machine = g.machine
+) AS f
+GROUP BY f.h ORDER BY time"""
 
-# 三台机器不是同一分钟上报（xx:00:57 / xx:01:01 / xx:01:07），按小时加总会把
-# "某台还没报"算成净值少了 4.5k，曲线出现假跳水。用 ASOF JOIN 前向填充到各自的最后已知值。
+# 三台机器不是同一分钟上报（xx:00:57 / xx:01:01 / xx:01:07），按小时加总会在
+# 「某台还没报」时算成净值少了 4.5k。用 ASOF JOIN 前向填充到各自最后已知值。
 SQL_WALLET_TOTAL = f"""
 WITH w AS (
     SELECT machine, toStartOfHour(datetime) AS h, argMax(value, datetime) AS v
