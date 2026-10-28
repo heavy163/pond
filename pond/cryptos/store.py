@@ -16,15 +16,55 @@ from __future__ import annotations
 
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import clickhouse_connect
 from loguru import logger
 
-from pond.cryptos.schema import COLUMNS, TIME_COLUMN, validate_rows
+from pond.cryptos.schema import COLUMNS, TIME_COLUMN, now_utc, validate_rows
 
 CRYPTOS_DB = "cryptos"
+
+
+FUTURE_TOL = timedelta(minutes=5)
+
+
+def drop_future_rows(table: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """丢掉时间戳在未来的行 —— 入库前的最后一道闸。
+
+    实测：MEXC 对 `*STOCK` 类代币会返回「当前小时」甚至下一小时的 K线
+    （2026-10-28 04:50 UTC 调用，返回 05:00 的 bar）。这类 bar 一旦入库，
+    `max(open_time)` 就跑到未来，缺口检测、新鲜度、覆盖率全部失真。
+
+    容差 5 分钟：交易所时钟偏差通常在秒级，5 分钟只拦真未来。
+    """
+    tcol = TIME_COLUMN.get(table)
+    if not tcol:
+        return rows
+    limit = now_utc() + FUTURE_TOL
+    kept = [r for r in rows if r[tcol] is None or r[tcol] <= limit]
+    if len(kept) != len(rows):
+        logger.warning(
+            f"[{table}] 丢弃 {len(rows) - len(kept)} 行未来数据"
+            f"（最远 {max(r[tcol] for r in rows):%Y-%m-%d %H:%M}）"
+        )
+    return kept
+
+
+def clip_window(table: str, rows: list[dict[str, Any]], start, end) -> list[dict[str, Any]]:
+    """把行裁到 [start, end) 内 —— 交易所经常无视窗口参数。
+
+    实测：MEXC 的 contract/kline 会把尚未收盘的当前小时 bar 一起返回
+    （04:52 调用，返回 04:00 的 bar），不裁的话库里就躺着未收盘的 OHLC。
+    """
+    tcol = TIME_COLUMN.get(table)
+    if not tcol:
+        return rows
+    kept = [r for r in rows if start <= r[tcol] < end]
+    if len(kept) != len(rows):
+        logger.debug(f"[{table}] 窗口裁剪丢弃 {len(rows) - len(kept)} 行")
+    return kept
 
 
 class CryptoStore:
@@ -84,6 +124,7 @@ class CryptoStore:
         if not rows:
             return 0
         validate_rows(table, rows)
+        rows = drop_future_rows(table, rows)
         cols = COLUMNS[table]
         data = [[r[c] for c in cols] for r in rows]
         self._client().insert(

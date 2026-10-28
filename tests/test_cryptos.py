@@ -342,3 +342,46 @@ def test_spot_backfill_path_exists():
 
     assert DATA_TABLE["spot"] == TABLE_KLINE_SPOT
     assert "spot" in FETCH
+
+
+# ---------------- 未来数据拦截 ----------------
+
+
+def test_drop_future_rows_kline():
+    """MEXC 会返回下一小时的 bar，必须在入库前丢掉（实测踩过 247 行）。"""
+    import datetime as dt
+
+    from pond.cryptos.schema import TABLE_KLINE_FUT
+    from pond.cryptos.store import drop_future_rows
+
+    now = dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    def row(open_time):
+        return {"venue": "v", "code": "X-USDT", "open_time": open_time,
+                "datetime": open_time, "open": 1.0, "high": 1.0, "low": 1.0,
+                "close": 1.0, "volume": 1.0, "quote_volume": 1.0, "count": 0.0,
+                "taker_buy_volume": 0.0, "taker_buy_quote_volume": 0.0,
+                "ingested_at": now}
+
+    rows = [
+        row(now - dt.timedelta(hours=2)),
+        row(now),
+        row(now + dt.timedelta(hours=1)),        # 未来 → 丢
+        row(now + dt.timedelta(hours=19)),       # 未来 → 丢
+    ]
+    kept = drop_future_rows(TABLE_KLINE_FUT, rows)
+    assert len(kept) == 2, len(kept)
+    assert max(r["open_time"] for r in kept) == now
+
+
+def test_drop_future_rows_ignores_funding_gap():
+    """容差 5 分钟：秒级时钟偏差不能误杀。"""
+    import datetime as dt
+
+    from pond.cryptos.schema import TABLE_FUNDING
+    from pond.cryptos.store import drop_future_rows
+
+    now = dt.datetime.now(dt.timezone.utc)
+    row = {"venue": "v", "code": "X-USDT", "datetime": now + dt.timedelta(minutes=4),
+           "fundingRate": 0.01, "markPrice": 1.0, "interval_sec": 28800, "ingested_at": now}
+    assert len(drop_future_rows(TABLE_FUNDING, [row])) == 1

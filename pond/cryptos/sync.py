@@ -37,7 +37,7 @@ from pond.cryptos.schema import (
     TABLE_OI,
     now_utc,
 )
-from pond.cryptos.store import CryptoStore
+from pond.cryptos.store import CryptoStore, clip_window
 from pond.cryptos.venues.registry import make_adapter
 
 DATA_TABLE = {
@@ -258,7 +258,7 @@ class CryptoHelper:
 
         async def one(raw: str) -> int:
             async with sem:
-                rows = await fn(raw, start, end)
+                rows = clip_window(table, await fn(raw, start, end), start, end)
                 if rows and not self.dry_run:
                     await asyncio.to_thread(self.store.insert, table, rows)
                 return len(rows)

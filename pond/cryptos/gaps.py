@@ -42,7 +42,7 @@ from pond.cryptos.schema import (
     TABLE_KLINE_SPOT,
     now_utc,
 )
-from pond.cryptos.store import CryptoStore
+from pond.cryptos.store import CryptoStore, clip_window
 from pond.cryptos.venues.registry import make_adapter
 
 TS_COL = {TABLE_KLINE_FUT: "open_time", TABLE_KLINE_SPOT: "open_time"}
@@ -90,6 +90,7 @@ class RepairResult:
     repaired: int = 0
     failed: int = 0
     lost: int = 0
+    skipped_codes: int = 0        # 不在当前 universe 里、主动跳过的码
     errors: list[str] = field(default_factory=list)
 
 
@@ -359,6 +360,14 @@ class GapRepairer:
         for venue, items in by_venue.items():
             spec = self.config.get(venue)
             async with make_adapter(spec) as ad:
+                # 只修当前 universe 里的码。否则表格里遗留的旧码（例如换池前的
+                # 字母序 30 个 + MEXC 的 *STOCK 代币）会被永远"养着"：
+                # 每小时都按它的历史区间回灌一次，既浪费请求又把脏数据写回来。
+                inst = await ad.instruments()
+                raw_map = {i["code"]: i["raw_code"] for i in inst}
+                keep = [g for g in items if g.code in raw_map or g.code == "*"]
+                res.skipped_codes += len({g.code for g in items}) - len({g.code for g in keep})
+                items = keep
                 by_type: dict[str, list[Gap]] = defaultdict(list)
                 for g in items:
                     by_type[g.data_type].append(g)
@@ -370,29 +379,21 @@ class GapRepairer:
                         windows[g.code] = (min(lo, g.day), max(hi, g.day))
                     sem = asyncio.Semaphore(spec.concurrency)
                     tasks = [
-                        self._repair_code(ad, venue, dt, code, lo, hi, sem, res)
+                        self._repair_code(ad, venue, dt, code, raw_map[code], lo, hi, sem, res)
                         for code, (lo, hi) in windows.items()
                     ]
                     await asyncio.gather(*tasks, return_exceptions=True)
         return res
 
-    async def _repair_code(self, ad, venue, dt, code, lo: date, hi: date, sem, res) -> None:
+    async def _repair_code(self, ad, venue, dt, code, raw_code, lo: date, hi: date, sem, res) -> None:
         start = datetime(lo.year, lo.month, lo.day, tzinfo=timezone.utc)
+        # 修复窗口不得越过「最近一个已收盘整点」：交易所会返回尚未收盘的当前小时 bar，
+        # 那种 bar 的 OHLC 还在变，写进库就是错的（比缺一根更糟）。
         end = datetime(hi.year, hi.month, hi.day, tzinfo=timezone.utc) + timedelta(days=1)
-        # raw_code 与 code 的映射（instrument 表里存了 raw）
-        raw = self.store.query(
-            f"SELECT raw_code FROM {self.store.database}.instrument FINAL "
-            f"WHERE venue = %(v)s AND code = %(c)s LIMIT 1",
-            {"v": venue, "c": code},
-        )
-        if not raw:
-            res.failed += 1
-            res.errors.append(f"{venue}/{code}: instrument 表里找不到 raw_code")
-            return
-        raw_code = raw[0][0]
+        end = min(end, now_utc().replace(minute=0, second=0, microsecond=0))
         try:
             async with sem:
-                rows = await FETCH[dt](ad, raw_code, start, end)
+                rows = clip_window(DATA_TABLE[dt], await FETCH[dt](ad, raw_code, start, end), start, end)
         except Exception as e:  # noqa: BLE001
             res.failed += 1
             res.errors.append(f"{venue}/{dt}/{code} {lo}~{hi}: {type(e).__name__}: {e}")
