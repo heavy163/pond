@@ -220,13 +220,22 @@ r AS (
 SELECT h AS time, round(sum(ret * v) / sum(v) * 1e4, 1) AS "组合每小时收益(bp)"
 FROM r GROUP BY h HAVING isFinite(sum(ret * v)) ORDER BY time"""
 
+# future_position 不是逐小时全量快照：完整快照每天只在 00:02~00:30 写一次（约 1,550 行），
+# 其余时间是单条事件行（stoploss_exiting / exited，1~9 行）。
+# 直接按小时 uniqExact 会把「只写了一条止损事件的那个小时」算成 0 持仓 —— 那是最开始的错。
+# 正确口径：只认完整快照（行数 >= 100），得到的是**日频**持仓宽度。
 SQL_POS_WIDTH = """
-SELECT toStartOfHour(datetime) AS time,
-       uniqExactIf(pair, side = 'long' AND status IN ('long', 'signal_exiting')) AS "多头持仓数",
-       uniqExactIf(pair, side = 'short' AND status IN ('short', 'signal_exiting')) AS "空头持仓数"
-FROM quant.future_position
-WHERE datetime >= $__fromTime AND datetime <= $__toTime
-GROUP BY time ORDER BY time"""
+WITH snap AS (
+    SELECT toStartOfHour(datetime) AS h,
+           count() AS nrows,
+           uniqExactIf(pair, side = 'long'  AND status IN ('long', 'signal_exiting')) AS longs,
+           uniqExactIf(pair, side = 'short' AND status IN ('short', 'signal_exiting')) AS shorts
+    FROM quant.future_position
+    WHERE datetime >= $__fromTime AND datetime <= $__toTime
+    GROUP BY h
+    HAVING nrows >= 100
+)
+SELECT h AS time, longs AS "多头持仓数", shorts AS "空头持仓数", longs + shorts AS "合计" FROM snap ORDER BY time"""
 
 # 策略每小时收益 × 截面离散度（双轴）
 SQL_RET_VS_DISP = CTE + f""",
@@ -435,7 +444,7 @@ P.append(ts(nid(), "组合每小时收益（bp）", SQL_PORT_RET, 12, y, 12, 6, 
             desc="按各机器净值加权的小时收益。"))
 y += 8
 P.append(ts(nid(), "持仓宽度（多/空 品种数）", SQL_POS_WIDTH, 0, y, 12, 8, unit="none",
-            desc="同时持有的品种数。宽度骤降=被强平/停开仓/信号空转。"))
+            desc="策略每天 00:0x 写一次完整持仓快照，这里只取完整快照（行数 ≥100），所以是**日频**、点数=天数。宽度骤降=被强平/停开仓/信号空转。（小时级的零散行是止损/平仓事件，不代表全量持仓，已排除。）"))
 P.append(ts(nid(), "策略收益 vs 截面离散度", SQL_RET_VS_DISP, 12, y, 12, 8, unit="none",
             desc="蓝=策略每小时收益，橙=当期截面离散度。离散度高的时段策略是否同步放大收益，是「吃到截面」的直接证据。"))
 y += 8
