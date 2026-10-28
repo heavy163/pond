@@ -220,22 +220,107 @@ r AS (
 SELECT h AS time, round(sum(ret * v) / sum(v) * 1e4, 1) AS "组合每小时收益(bp)"
 FROM r GROUP BY h HAVING isFinite(sum(ret * v)) ORDER BY time"""
 
-# future_position 不是逐小时全量快照：完整快照每天只在 00:02~00:30 写一次（约 1,550 行），
-# 其余时间是单条事件行（stoploss_exiting / exited，1~9 行）。
-# 直接按小时 uniqExact 会把「只写了一条止损事件的那个小时」算成 0 持仓 —— 那是最开始的错。
-# 正确口径：只认完整快照（行数 >= 100），得到的是**日频**持仓宽度。
-SQL_POS_WIDTH = """
-WITH snap AS (
+# future_position 的两个坑：
+#   ① 不是逐小时全量快照 —— 完整快照每天 00:0x 写一次（约 1,550 行），其余是单条止损/平仓事件
+#   ② 每天只写**一个子策略**（strategy_id 0/1/2 轮转），当天快照只有 1/3 的账本
+# 所以持仓宽度、gross 都必须：只认完整快照（nrows>=100）+ 按 strategy_id 做 ASOF 前向填充后加总。
+COHORT_SNAP = """
+snap AS (
     SELECT toStartOfHour(datetime) AS h,
+           strategy_id,
            count() AS nrows,
-           uniqExactIf(pair, side = 'long'  AND status IN ('long', 'signal_exiting')) AS longs,
-           uniqExactIf(pair, side = 'short' AND status IN ('short', 'signal_exiting')) AS shorts
+           sumIf(abs(stake_amount), side = 'long') + sumIf(abs(stake_amount), side = 'short') AS gross,
+           uniqExactIf(pair, side = 'long'  AND status IN ('long', 'signal_exiting')) AS lcnt,
+           uniqExactIf(pair, side = 'short' AND status IN ('short', 'signal_exiting')) AS scnt
     FROM quant.future_position
-    WHERE datetime >= $__fromTime AND datetime <= $__toTime
-    GROUP BY h
+    WHERE datetime >= $__fromTime - INTERVAL 5 DAY AND datetime <= $__toTime
+    GROUP BY h, strategy_id
     HAVING nrows >= 100
+),
+sgrid AS (
+    SELECT hours.h AS h, ids.strategy_id AS strategy_id
+    FROM (SELECT DISTINCT h FROM snap) AS hours
+    CROSS JOIN (SELECT DISTINCT strategy_id FROM snap) AS ids
+),
+filled AS (
+    SELECT g.h AS h, g.strategy_id AS strategy_id,
+           s.gross AS gross, s.lcnt AS lcnt, s.scnt AS scnt
+    FROM sgrid AS g
+    ASOF LEFT JOIN snap AS s ON s.strategy_id = g.strategy_id AND g.h >= s.h
 )
-SELECT h AS time, longs AS "多头持仓数", shorts AS "空头持仓数", longs + shorts AS "合计" FROM snap ORDER BY time"""
+"""
+
+WALLET_HOURLY = """
+w AS (
+    SELECT machine, toStartOfHour(datetime) AS h, argMax(value, datetime) AS v
+    FROM quant.future_wallet
+    WHERE strategy = 'neutral_v1' AND datetime >= $__fromTime AND datetime <= $__toTime
+    GROUP BY machine, h
+),
+wgrid AS (
+    SELECT hours.h AS h, ms.machine AS machine
+    FROM (SELECT DISTINCT h FROM w) AS hours
+    CROSS JOIN (SELECT DISTINCT machine FROM w) AS ms
+),
+wfilled AS (
+    SELECT g.h AS h, s.v AS v
+    FROM wgrid AS g
+    ASOF LEFT JOIN w AS s ON s.machine = g.machine AND g.h >= s.h
+)
+"""
+
+SQL_POS_WIDTH = "WITH " + COHORT_SNAP + """
+SELECT h AS time,
+       sum(lcnt) AS "多头品种数(3 cohort)",
+       sum(scnt) AS "空头品种数(3 cohort)"
+FROM filled GROUP BY h ORDER BY time"""
+
+SQL_COHORT_GROSS = "WITH " + COHORT_SNAP + """
+SELECT h AS time,
+       round(maxIf(gross, strategy_id = 0), 1) AS "cohort0",
+       round(maxIf(gross, strategy_id = 1), 1) AS "cohort1",
+       round(maxIf(gross, strategy_id = 2), 1) AS "cohort2",
+       round(sum(gross), 1) AS "合计gross"
+FROM filled GROUP BY h ORDER BY time"""
+
+SQL_EXPO = "WITH " + COHORT_SNAP + "," + WALLET_HOURLY + """
+,
+gross_h AS (SELECT h, sum(gross) AS g FROM filled GROUP BY h),
+eq_h AS (SELECT h, sum(v) AS eq FROM wfilled GROUP BY h)
+SELECT gross_h.h AS time,
+       round(gross_h.g, 1) AS "gross(USDT)",
+       round(eq_h.eq, 1) AS "权益(USDT)",
+       round(gross_h.g / eq_h.eq * 100, 1) AS "仓位比例%"
+FROM gross_h INNER JOIN eq_h ON eq_h.h = gross_h.h
+ORDER BY time"""
+
+# 单个标量：取最后一小时；三个 stat 各自输出一个数，不混列
+SQL_STAT_EXPO_RATIO = (
+    "WITH " + COHORT_SNAP + "," + WALLET_HOURLY + """
+SELECT round(argMax(g, h) / argMax(eq, h) * 100, 1)
+FROM (
+    SELECT g.h AS h, g.g AS g, e.eq AS eq
+    FROM (SELECT h, sum(gross) AS g FROM filled GROUP BY h) AS g
+    INNER JOIN (SELECT h, sum(v) AS eq FROM wfilled GROUP BY h) AS e ON e.h = g.h
+)"""
+)
+
+SQL_STAT_GROSS = (
+    "WITH " + COHORT_SNAP + """
+SELECT round(argMax(g, h), 0) FROM (SELECT h, sum(gross) AS g FROM filled GROUP BY h)"""
+)
+
+SQL_STAT_EQUITY = (
+    "WITH " + WALLET_HOURLY + """
+SELECT round(argMax(eq, h), 0) FROM (SELECT h, sum(v) AS eq FROM wfilled GROUP BY h)"""
+)
+
+SQL_STAT_COHORT = (
+    "WITH " + COHORT_SNAP + """
+SELECT round(avg(g), 0) FROM (
+    SELECT strategy_id, argMax(gross, h) AS g FROM filled GROUP BY strategy_id
+)"""
+)
 
 # 策略每小时收益 × 截面离散度（双轴）
 SQL_RET_VS_DISP = CTE + f""",
@@ -454,14 +539,35 @@ P.append(table(nid(), "各机器表现（窗口内）", SQL_WALLET_STATS, 0, y, 
 P.append(ts(nid(), "组合每小时收益（bp）", SQL_PORT_RET, 12, y, 12, 6, unit="none",
             desc="按各机器净值加权的小时收益。"))
 y += 8
-P.append(ts(nid(), "持仓宽度（多/空 品种数）", SQL_POS_WIDTH, 0, y, 12, 8, unit="none",
+P.append(ts(nid(), "持仓宽度（3 cohort 合计，多/空 品种数）", SQL_POS_WIDTH, 0, y, 12, 8, unit="none",
             desc="策略每天 00:0x 写一次完整持仓快照，这里只取完整快照（行数 ≥100），所以是**日频**、点数=天数。宽度骤降=被强平/停开仓/信号空转。（小时级的零散行是止损/平仓事件，不代表全量持仓，已排除。）"))
 P.append(ts(nid(), "策略收益 vs 截面离散度", SQL_RET_VS_DISP, 12, y, 12, 8, unit="none",
             desc="蓝=策略每小时收益，橙=当期截面离散度。离散度高的时段策略是否同步放大收益，是「吃到截面」的直接证据。"))
 y += 8
 
-# ④ 汇总
-P.append(row(nid(), "④ 汇总", y)); y += 1
+# ④ 敞口与资金效率
+# 策略是 3 天持有 × 3 个子策略轮转，每天只写一个 cohort 的快照。
+# 只看单日快照会把 gross 低估 3 倍（我曾据此得出"仓位只有 31%"的错误结论）。
+P.append(row(nid(), "④ 敞口与资金效率（3 cohort 合计）", y)); y += 1
+P.append(stat(nid(), "仓位比例（gross/权益 %）", SQL_STAT_EXPO_RATIO, 0, y, 6, 4, unit="percent", decimals=1,
+              desc="全部 cohort 的 gross 名义 / 账户权益。≈100% 即满仓；>100% 说明用了杠杆。",
+              steps=[{"color": "red", "value": None}, {"color": "yellow", "value": 50},
+                     {"color": "green", "value": 80}, {"color": "orange", "value": 120}]))
+P.append(stat(nid(), "合计 gross（USDT）", SQL_STAT_GROSS, 6, y, 6, 4, unit="usd", decimals=0,
+              desc="3 个 cohort 的持仓名义绝对值之和（多+空，不轧差）。"))
+P.append(stat(nid(), "合计权益（USDT）", SQL_STAT_EQUITY, 12, y, 6, 4, unit="usd", decimals=0,
+              desc="三台机器净值加总（ASOF 前向填充，避免某台未上报造成假跌）。"))
+P.append(stat(nid(), "单 cohort gross（USDT）", SQL_STAT_COHORT, 18, y, 6, 4, unit="usd", decimals=0,
+              desc="每个子策略的持仓名义。总 gross ÷ 这个数 = 当前有几个 cohort 在持。"))
+y += 4
+P.append(ts(nid(), "仓位比例随时间（gross/权益 %）", SQL_EXPO, 0, y, 12, 7, unit="percent",
+            desc="100% = 满仓。曲线掉下来通常是调仓间隙（老 cohort 已平、新 cohort 未开）。"))
+P.append(ts(nid(), "各 cohort gross（USDT）", SQL_COHORT_GROSS, 12, y, 12, 7, unit="usd",
+            desc="三个子策略各自的名义规模。某条线归零 = 该 cohort 当日空仓/未调仓。"))
+y += 7
+
+# ⑤ 汇总
+P.append(row(nid(), "⑤ 汇总", y)); y += 1
 P.append(table(nid(), "近 7 日关键指标", SQL_SUMMARY, 0, y, 12, 6))
 P.append(table(nid(), "说明", "SELECT '占位' AS a", 12, y, 12, 6))
 
