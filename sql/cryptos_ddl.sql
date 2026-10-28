@@ -120,17 +120,19 @@ ORDER BY (venue, code, datetime);
 -- ---------- 7. 覆盖度台账（自检）----------
 CREATE TABLE IF NOT EXISTS cryptos.coverage
 (
-    venue      LowCardinality(String),
-    code       LowCardinality(String),
-    trade_date Date,
-    n_kline    UInt16,          -- 正常应 24
-    n_oi       UInt16,
-    n_funding  UInt8,
-    checked_at DateTime
+    venue        LowCardinality(String),
+    code         LowCardinality(String),
+    data_type    LowCardinality(String),   -- kline / oi / funding
+    trade_date   Date,
+    n_expected   UInt16,                   -- 当天应有根数（由参照时钟算，不是常量 24）
+    n_actual     UInt16,
+    status       LowCardinality(String),   -- ok / gap / lost / rampup
+    note         String,
+    checked_at   DateTime
 )
 ENGINE = ReplacingMergeTree(checked_at)
 PARTITION BY toYYYYMM(trade_date)
-ORDER BY (venue, code, trade_date);
+ORDER BY (venue, data_type, code, trade_date);
 
 -- ---------- 8. 回灌任务台账（断点续传）----------
 -- 回灌单位是 (venue, data_type, code)，不是时间窗；每写一批推进 cursor_time
