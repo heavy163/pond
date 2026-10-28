@@ -67,6 +67,40 @@ class BybitAdapter(VenueAdapter):
     def resolve_code(self, raw_code: str) -> str:
         return f"{raw_code[:-4]}-USDT" if raw_code.endswith("USDT") else raw_code
 
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对（USDT 计价）。"""
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+
+        cursor = ""
+        while True:
+            params = {"category": "spot", "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            d = await self.request(
+                f"{self.BASE}/v5/market/instruments-info", params, endpoint="meta", cost=1
+            )
+            res = d.get("result") or {}
+            for it in res.get("list", []):
+                if it.get("status") != "Trading":
+                    continue
+                if it.get("quoteCoin") != "USDT":
+                    continue
+                out.append({
+                    "venue": self.name,
+                    "code": f"{it['baseCoin']}-{it['quoteCoin']}",
+                    "raw_code": it["symbol"],
+                    "base": it["baseCoin"], "quote": it["quoteCoin"],
+                    "contract_type": "spot", "multiplier": 1.0,
+                    "listed_at": None, "delisted_at": None, "ingested_at": now,
+                })
+            cursor = res.get("nextPageCursor") or ""
+            if not cursor:
+                break
+
+        logger.info(f"[bybit] spot_instruments: {len(out)} 个 USDT 现货对")
+        return out
+
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:

@@ -176,6 +176,10 @@ class VenueAdapter(ABC):
     ) -> list[dict[str, Any]]:
         """返回该 symbol 在 [start, end) 的 1h K线（可能多页）。"""
 
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对。没有现货业务的所返回空。"""
+        return []
+
     @abstractmethod
     async def funding(
         self, raw_code: str, start: datetime, end: datetime

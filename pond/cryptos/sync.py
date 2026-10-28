@@ -185,16 +185,15 @@ class CryptoHelper:
         try:
             async with asyncio.timeout(spec.deadline_sec):
                 async with make_adapter(spec) as ad:
-                    raw_codes = await self._universe(ad, spec, refresh)
-                    res.codes = len(raw_codes)
-                    if not raw_codes:
+                    uni = await self._universe(ad, spec, refresh)
+                    res.codes = len(uni["perp"])
+                    if not uni["perp"]:
                         res.status = PARTIAL
-                        res.errors.append(
-                            f"{spec.name}: universe 为空（include={spec.symbols_include}）"
-                        )
+                        res.errors.append(f"{spec.name}: 合约 universe 为空")
                     for dtype in spec.data:
+                        codes = uni["spot"] if dtype == "spot" else uni["perp"]
                         res.rows[dtype] = await self._sync_type(
-                            ad, spec, dtype, raw_codes, start, end, res
+                            ad, spec, dtype, codes, start, end, res
                         )
                     res.stats = dict(ad.stats)
         except (TimeoutError, asyncio.TimeoutError):
@@ -220,11 +219,23 @@ class CryptoHelper:
         )
         return res
 
-    async def _universe(self, ad, spec: VenueSpec, refresh: bool) -> list[str]:
+    async def _universe(self, ad, spec: VenueSpec, refresh: bool) -> dict[str, list[str]]:
+        """按市场返回各自的 raw_code 列表。
+
+        现货与合约是两套 symbol（bybit 同名、kucoin/htx 不同名），
+        混用会漏采（现货对里有很多没有合约的币）。
+        """
         inst = await ad.instruments()
-        if inst and (refresh or not self.dry_run and not self._has_instruments(spec.name)):
-            await asyncio.to_thread(self.store.insert, TABLE_INSTRUMENT, inst)
-        return spec.select_instruments(inst)
+        spot_inst = await ad.spot_instruments() if "spot" in spec.data else []
+        rows = inst + spot_inst
+        # 每轮都写（ReplacingMergeTree，几千行可忽略）：原先只在「该所一条都没有」时写，
+        # 导致新增的 spot 元数据永远进不来。
+        if rows and not self.dry_run:
+            await asyncio.to_thread(self.store.insert, TABLE_INSTRUMENT, rows)
+        return {
+            "perp": spec.select_instruments(inst),
+            "spot": spec.select_instruments(spot_inst) if spot_inst else [],
+        }
 
     def _has_instruments(self, venue: str) -> bool:
         rows = self.store.query(

@@ -67,8 +67,35 @@ class KucoinAdapter(VenueAdapter):
         return out
 
     def resolve_code(self, raw_code: str) -> str:
+        if "-" in raw_code:          # 现货 symbol 本身就是 BTC-USDT
+            return raw_code
         base = raw_code.split("USDT")[0]
         return f"{CODE_ALIAS.get(base, base)}-USDT"
+
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对（USDT 计价）。"""
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+
+        d = await self.request(
+            "https://api.kucoin.com/api/v2/symbols", None, endpoint="meta", cost=1
+        )
+        for it in d.get("data") or []:
+            if not it.get("enableTrading"):
+                continue
+            if it.get("quoteCurrency") != "USDT":
+                continue
+            out.append({
+                "venue": self.name,
+                "code": it["symbol"],
+                "raw_code": it["symbol"],
+                "base": it["baseCurrency"], "quote": "USDT",
+                "contract_type": "spot", "multiplier": 1.0,
+                "listed_at": None, "delisted_at": None, "ingested_at": now,
+            })
+
+        logger.info(f"[kucoin] spot_instruments: {len(out)} 个 USDT 现货对")
+        return out
 
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"

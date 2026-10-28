@@ -83,6 +83,31 @@ class GateAdapter(VenueAdapter):
             self._mult[raw_code] = float(qm)
         return self._mult[raw_code]
 
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对（USDT 计价）。"""
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+
+        rows = await self.request(
+            f"{self.BASE}/spot/currency_pairs", None, endpoint="meta", cost=1
+        )
+        for it in rows or []:
+            if it.get("trade_status") != "tradable":
+                continue
+            if it.get("quote") != "USDT":
+                continue
+            out.append({
+                "venue": self.name,
+                "code": it["id"].replace("_", "-"),
+                "raw_code": it["id"],
+                "base": it["base"], "quote": it["quote"],
+                "contract_type": "spot", "multiplier": 1.0,
+                "listed_at": None, "delisted_at": None, "ingested_at": now,
+            })
+
+        logger.info(f"[gate] spot_instruments: {len(out)} 个 USDT 现货对")
+        return out
+
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:

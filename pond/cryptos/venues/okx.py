@@ -66,6 +66,33 @@ class OkxAdapter(VenueAdapter):
 
     # ---------------- K线 ----------------
 
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对（USDT 计价）。"""
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+
+        d = await self.request(
+            f"{self.BASE}/api/v5/public/instruments",
+            {"instType": "SPOT"}, endpoint="meta", cost=1,
+        )
+        for it in d.get("data") or []:
+            if it.get("state") != "live":
+                continue
+            if it.get("quoteCcy") != "USDT":
+                continue
+            out.append({
+                "venue": self.name,
+                "code": f"{it['baseCcy']}-USDT",
+                "raw_code": it["instId"],
+                "base": it["baseCcy"], "quote": "USDT",
+                "contract_type": "spot", "multiplier": 1.0,
+                "listed_at": to_utc(int(it["listTime"])) if it.get("listTime") else None,
+                "delisted_at": None, "ingested_at": now,
+            })
+
+        logger.info(f"[okx] spot_instruments: {len(out)} 个 USDT 现货对")
+        return out
+
     async def kline(
         self, raw: str, start: datetime, end: datetime, market: str = "perp"
     ) -> list[dict[str, Any]]:

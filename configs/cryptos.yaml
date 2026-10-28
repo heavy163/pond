@@ -23,7 +23,7 @@ venues:
     symbols:
       include: []            # 子串匹配 raw symbol，如 [USDT] 或 [BTCUSDT, ETHUSDT]
       exclude: [USDC, BUSD, "_"]
-      top_n: 30              # 0 = 不限；当前按字母序，P2 改按成交额排名
+      top_n: 0              # 0 = 不限；当前按字母序，P2 改按成交额排名
     buckets:
       # Binance USDT-M 官方 2400 weight/min，这里只用一半
       default: {mode: weight, rate: 1200, window: 60, burst: 1.0}
@@ -42,11 +42,9 @@ venues:
     concurrency: 8
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/2s
       kline:   {mode: requests, rate: 15, window: 1, burst: 2.0}   # candles 40/2s
@@ -59,11 +57,9 @@ venues:
     concurrency: 8
     data: [kline, funding, oi, spot]   # spot 走 category=spot，symbol 与永续同名
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 10, window: 1, burst: 1.0}   # 官方 120/5s
       kline:   {mode: requests, rate: 10, window: 1, burst: 1.0}
@@ -76,11 +72,9 @@ venues:
     concurrency: 6
     data: [kline, funding, oi, spot]   # OI 有 180 天历史，四家里最深；spot 走 /spot/candlesticks
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 8, window: 1, burst: 1.0}
       kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}
@@ -93,11 +87,9 @@ venues:
     concurrency: 8
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/s
       kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}
@@ -110,11 +102,9 @@ venues:
     concurrency: 6
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 6, window: 1, burst: 1.0}    # 官方 30/3s
       kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}    # 单页仅 200 根
@@ -127,11 +117,9 @@ venues:
     concurrency: 6
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 6, window: 1, burst: 1.0}
       kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
@@ -144,11 +132,9 @@ venues:
     concurrency: 6
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 6, window: 1, burst: 1.0}
       kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
@@ -161,11 +147,9 @@ venues:
     concurrency: 6
     data: [kline, funding, oi, spot]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 6, window: 1, burst: 1.0}    # 官方 1200 weight/min
       kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
@@ -180,11 +164,9 @@ venues:
     concurrency: 5
     data: [spot, fx]
     symbols:
-      include: [BTC, ETH, XRP, SOL, DOGE, ADA, AVAX, LINK, DOT, TRX,
-                SUI, APT, ARB, OP, TON, NEAR, ATOM, ETC, BCH, SHIB,
-                ENA, PEPE, WLD, SEI, STX, INJ, LDO, FIL, AAVE, UNI]
+      include: []
       exclude: []
-      top_n: 30
+      top_n: 0
     buckets:
       default: {mode: requests, rate: 8, window: 1, burst: 2.0}   # 官方 10/s
       kline:   {mode: requests, rate: 8, window: 1, burst: 2.0}

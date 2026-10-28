@@ -58,7 +58,37 @@ class MexcAdapter(VenueAdapter):
         return out
 
     def resolve_code(self, raw_code: str) -> str:
-        return raw_code.replace("_", "-")
+        if "_" in raw_code:                  # 合约 raw：BTC_USDT
+            return raw_code.replace("_", "-")
+        u = raw_code.upper()                 # 现货 raw：BTCUSDT
+        return f"{u[:-4]}-USDT" if u.endswith("USDT") else raw_code
+
+    async def spot_instruments(self) -> list[dict[str, Any]]:
+        """现货可交易对（USDT 计价）。"""
+        out: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
+
+        d = await self.request(
+            "https://api.mexc.com/api/v3/exchangeInfo", None, endpoint="meta", cost=1
+        )
+        for it in d.get("symbols") or []:
+            if it.get("status") not in ("1", "ENABLED"):
+                continue
+            if it.get("quoteAsset") != "USDT":
+                continue
+            if it.get("isSpotTradingAllowed") is False:
+                continue
+            out.append({
+                "venue": self.name,
+                "code": f"{it['baseAsset']}-USDT",
+                "raw_code": it["symbol"],
+                "base": it["baseAsset"], "quote": "USDT",
+                "contract_type": "spot", "multiplier": 1.0,
+                "listed_at": None, "delisted_at": None, "ingested_at": now,
+            })
+
+        logger.info(f"[mexc] spot_instruments: {len(out)} 个 USDT 现货对")
+        return out
 
     async def kline(
         self, raw_code: str, start: datetime, end: datetime, market: str = "perp"

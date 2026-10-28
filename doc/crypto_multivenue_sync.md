@@ -1902,3 +1902,58 @@ OHLC 合法性检查：`high < max(o,c)` 0 行、`low > min(o,c)` 0 行、价格
 2. 文本手术不要用「按行号切片」，要用「按内容定位 + 断言」。行号一错就是静默错位。
 
 修复后 `--days 2 --execute --no-coverage`（与定时任务完全相同的参数）实测 exit 0。
+
+---
+
+## 23. 取消选币白名单：全量采集
+
+### 23.1 问题
+
+采集端原来有 `symbols.include`（30 个主流币）+ `top_n: 30`。这家交易所明明有 1,000 多个
+合约，我们只采 25~29 个，覆盖率 2.6%~6.3%，而且**写死的白名单不跟随市场变化**。
+
+白名单是我在接 Upbit 时为了「让 9 家采同一批币、便于跨所对齐」自己加的——把采集范围
+当成了研究口径来裁剪。采集层的职责只有一件：**交易所提供什么就采什么，并证明采全了**。
+
+### 23.2 改动
+
+1. 10 个所的 `symbols.include` 清空、`top_n: 0`（= 不限）。
+2. 现货与合约是**两套 symbol**，必须各自取 universe：
+   - 新增 `VenueAdapter.spot_instruments()`，7 家各实现（bybit/okx/gate/bitget/kucoin/mexc/htx）
+   - `sync._universe()` 返回 `{"perp": [...], "spot": [...]}`，`spot` 类型用现货列表
+   - 之前拿合约 symbol 去套现货：大部分没有现货市场的合约会直接报错（每所 20 条错误就是这么来的）
+3. `resolve_code` 兼容现货 symbol（kucoin `BTC-USDT`、mexc `BTCUSDT`、htx `btcusdt`）。
+4. instrument 元数据每轮都写（原先只在「该所一条都没有」时写，导致新增的 spot 元数据永远进不来）。
+
+### 23.3 实测规模
+
+| 所 | 合约(perp) | 现货(spot) |
+|---|---|---|
+| mexc | 1,084 | 1,390 |
+| gate | 1,065 | 2,033 |
+| bitget | 861 | 3,519 |
+| bybit | 813 | 388 |
+| kucoin | 701 | 815 |
+| okx | 511 | 468 |
+| htx | 396 | 580 |
+| hyperliquid | 179 | — (纯永续 DEX) |
+| upbit | — | 299 (KRW) |
+
+### 23.4 代价
+
+- 单所全量一轮 10~27 分钟（gate 最大），仍在 55 分钟预算内，但需要盯着限频
+- hyperliquid 是最容易 429 的（179 个合约时就有 56 次），全量后要单独调桶
+- 存储：合约 5,613 × 24 行/天 ≈ 13.5 万行/天（K线），OI 同量级；ClickHouse 无压力
+
+### 23.5 完整性判据（现在是可验证的）
+
+```sql
+-- 交易所声明可采 vs 我们实采，差集必须是 0
+SELECT i.venue, count() AS missing
+FROM (SELECT DISTINCT venue, code FROM cryptos.instrument FINAL WHERE contract_type='perp') i
+LEFT JOIN (SELECT DISTINCT venue, code FROM cryptos.kline_futures_1h
+           WHERE ingested_at > now() - INTERVAL 40 MINUTE) k
+  ON i.venue=k.venue AND i.code=k.code
+WHERE k.code = ''
+GROUP BY i.venue
+```
