@@ -76,6 +76,7 @@ class VenueAdapter(ABC):
         endpoint: str = "default",
         cost: float = 1.0,
         method: str = "GET",
+        json_body: dict[str, Any] | None = None,
     ) -> Any:
         if self._client is None:
             raise RuntimeError(f"{self.name}: 必须在 async with 里使用")
@@ -88,7 +89,9 @@ class VenueAdapter(ABC):
             await lim.acquire(cost)
             self.stats["requests"] += 1
             try:
-                resp = await self._client.request(method, url, params=params)
+                resp = await self._client.request(
+                    method, url, params=params, json=json_body
+                )
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 last_exc = e
                 self.stats["network_err"] += 1

@@ -72,7 +72,11 @@ def main() -> int:
     if not args.execute:
         logger.warning("dry-run：只拉取，不写库。加 --execute 才会写。")
 
-    results = asyncio.run(helper.run_round(refresh_instruments=args.refresh_instruments))
+    results = asyncio.run(
+        helper.run_round(
+            venues=args.venue, refresh_instruments=args.refresh_instruments
+        )
+    )
 
     print("\n" + "=" * 78)
     print(f"{'venue':<12}{'status':<10}{'codes':>7}{'rows':>10}{'耗时':>10}{'errors':>8}")

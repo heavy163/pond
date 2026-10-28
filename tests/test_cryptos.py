@@ -107,3 +107,41 @@ def test_store_refuses_non_cryptos_database():
 
     with pytest.raises(ValueError, match="只允许写 cryptos"):
         CryptoStore(host="127.0.0.1", database="quant")
+
+
+# ---------------- select_instruments：按 base 匹配（实测踩过的坑）----------------
+
+
+def _rows():
+    return [
+        {"raw_code": "BTCUSDT", "base": "BTC"},
+        {"raw_code": "WBTCUSDT", "base": "WBTC"},
+        {"raw_code": "AIXBT_USDT", "base": "AIXBT"},
+        {"raw_code": "ETHFI_USDT", "base": "ETHFI"},
+        {"raw_code": "ETHUSDT", "base": "ETH"},
+        {"raw_code": "XBTUSDTM", "base": "BTC"},     # KuCoin 用 XBT 表示 BTC
+    ]
+
+
+def test_select_instruments_by_base_not_substring():
+    """写 BTC 只应拿到 base=BTC 的两个，不能带上 WBTC / AIXBT。"""
+    spec = VenueSpec(name="gate", symbols_include=("BTC",))
+    assert sorted(spec.select_instruments(_rows())) == ["BTCUSDT", "XBTUSDTM"]
+
+
+def test_select_instruments_exact_raw_code():
+    spec = VenueSpec(name="gate", symbols_include=("ETHUSDT",))
+    assert spec.select_instruments(_rows()) == ["ETHUSDT"]
+
+
+def test_select_instruments_fragment_fallback():
+    """include 里没有任何 base/raw 命中时，退化为子串匹配（如写 'ETH' 想找 ETHFI）。"""
+    spec = VenueSpec(name="gate", symbols_include=("ETHFI",))
+    assert spec.select_instruments(_rows()) == ["ETHFI_USDT"]
+
+
+def test_select_instruments_exclude_base():
+    spec = VenueSpec(name="gate", symbols_exclude=("WBTC", "AIXBT"))
+    got = spec.select_instruments(_rows())
+    assert "WBTCUSDT" not in got and "AIXBT_USDT" not in got
+    assert "BTCUSDT" in got

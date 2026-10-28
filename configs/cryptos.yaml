@@ -12,8 +12,9 @@ global:
   round_budget_sec: 3300     # 一轮硬上限（周期 3600s）
 
 venues:
+  # Binance 关闭：生产库 quant.kline_futures_1h 已有其历史数据，不重复采集
   binance:
-    enabled: true
+    enabled: false
     concurrency: 8
     deadline_sec: 3000       # 单所 50 分钟
     timeout_sec: 15
@@ -33,12 +34,101 @@ venues:
       funding: {mode: requests, rate: 120, window: 60, burst: 2.0}
       meta:    {mode: requests, rate: 10, window: 60, burst: 1.0}
 
-  # ---- 以下为 P1 待接入，适配器写好后把 enabled 打开即可 ----
+  # ================= 以下 8 家默认启用 =================
+  # 限频都是保守值（官方约 1/3~1/2），靠响应头与 429 反馈再调；口径各不相同。
+
   okx:
-    enabled: false
-    concurrency: 10
+    enabled: true
+    concurrency: 8
     data: [kline, funding, oi]
     symbols: {include: [], exclude: [], top_n: 30}
     buckets:
-      default: {mode: requests, rate: 10, window: 1, burst: 1.0}   # 官方 20/2s
-      candles: {mode: requests, rate: 20, window: 1, burst: 1.0}
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/2s
+      kline:   {mode: requests, rate: 15, window: 1, burst: 2.0}   # candles 40/2s
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 8, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  bybit:
+    enabled: true
+    concurrency: 8
+    data: [kline, funding, oi]     # OI 只留约 8 天，但确实有历史
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 10, window: 1, burst: 1.0}   # 官方 120/5s
+      kline:   {mode: requests, rate: 10, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 8, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  gate:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi]     # OI 有 180 天历史，四家里最深
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 8, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 2, window: 1, burst: 1.0}    # contracts 单次 ~1.7s
+
+  bitget:
+    enabled: true
+    concurrency: 8
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 8, window: 1, burst: 1.0}    # 官方 20/s
+      kline:   {mode: requests, rate: 8, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 5, window: 1, burst: 1.0}
+
+  kucoin:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}    # 官方 30/3s
+      kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}    # 单页仅 200 根
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 4, window: 1, burst: 1.0}
+
+  mexc:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 3, window: 1, burst: 1.0}
+
+  htx:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 6, window: 1, burst: 1.0}
+      meta:    {mode: requests, rate: 2, window: 1, burst: 1.0}    # 单次 ~1.4s
+
+  hyperliquid:
+    enabled: true
+    concurrency: 6
+    data: [kline, funding, oi]
+    symbols: {include: [], exclude: [], top_n: 30}
+    buckets:
+      default: {mode: requests, rate: 6, window: 1, burst: 1.0}    # 官方 1200 weight/min
+      kline:   {mode: requests, rate: 6, window: 1, burst: 1.0}
+      funding: {mode: requests, rate: 6, window: 1, burst: 1.0}
+      oi:      {mode: requests, rate: 4, window: 1, burst: 1.0}    # 每个 symbol 拉全量 ctx
+      meta:    {mode: requests, rate: 4, window: 1, burst: 1.0}

@@ -185,6 +185,11 @@ class CryptoHelper:
                 async with make_adapter(spec) as ad:
                     raw_codes = await self._universe(ad, spec, refresh)
                     res.codes = len(raw_codes)
+                    if not raw_codes:
+                        res.status = PARTIAL
+                        res.errors.append(
+                            f"{spec.name}: universe 为空（include={spec.symbols_include}）"
+                        )
                     for dtype in spec.data:
                         res.rows[dtype] = await self._sync_type(
                             ad, spec, dtype, raw_codes, start, end, res
@@ -213,13 +218,11 @@ class CryptoHelper:
         )
         return res
 
-    async def _universe(
-        self, ad, spec: VenueSpec, refresh: bool
-    ) -> list[str]:
+    async def _universe(self, ad, spec: VenueSpec, refresh: bool) -> list[str]:
         inst = await ad.instruments()
         if inst and (refresh or not self.dry_run and not self._has_instruments(spec.name)):
             await asyncio.to_thread(self.store.insert, TABLE_INSTRUMENT, inst)
-        return spec.select_symbols([i["raw_code"] for i in inst])
+        return spec.select_instruments(inst)
 
     def _has_instruments(self, venue: str) -> bool:
         rows = self.store.query(

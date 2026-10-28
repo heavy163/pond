@@ -71,7 +71,7 @@ class VenueSpec:
         return self.buckets.get(endpoint) or self.buckets["default"]
 
     def select_symbols(self, raw_codes: Iterable[str]) -> list[str]:
-        """include/exclude/top_n 过滤。
+        """按 include/exclude/top_n 过滤 raw code（不含 base 信息时的退化版本）。
 
         include 的每个模式独立判断：能精确命中就只取精确（BTCUSDT 不会带上 WBTCUSDT），
         否则退化为子串匹配（写 USDT 就取全部 USDT 对）。
@@ -88,6 +88,37 @@ class VenueSpec:
         if self.top_n and len(sel) > self.top_n:
             sel = sorted(sel)[: self.top_n]
         return sel
+
+    def select_instruments(self, rows: list[dict]) -> list[str]:
+        """按 instrument 行（含 raw_code/base）选合约，返回 raw_code 列表。
+
+        匹配优先级：base 资产 > 精确 raw_code > 子串兜底。
+        原因：用户写 "BTC" 的意图是"比特币"，而不是"所有含 BTC 字样的合约"——
+        纯子串会把 AIXBT_USDT、WBTC_USDT 一起选进来（实测踩过）。
+        """
+        inc = set(self.symbols_include)
+        if inc:
+            hit = [
+                r for r in rows
+                if r.get("base") in inc or r["raw_code"] in inc
+            ]
+            if not hit:      # 兜底：写 FragMent 时仍按子串匹配
+                hit = [r for r in rows if any(p in r["raw_code"] for p in inc)]
+            rows = hit
+        exc = set(self.symbols_exclude)
+        if exc:
+            rows = [
+                r for r in rows
+                if not (
+                    r.get("base") in exc
+                    or r["raw_code"] in exc
+                    or any(p in r["raw_code"] for p in exc)
+                )
+            ]
+        raws = [r["raw_code"] for r in rows]
+        if self.top_n and len(raws) > self.top_n:
+            raws = sorted(raws)[: self.top_n]
+        return raws
 
 
 @dataclass

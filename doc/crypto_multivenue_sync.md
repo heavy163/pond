@@ -1038,13 +1038,88 @@ python -m pytest tests/test_cryptos.py -q
 
 | 项 | 现状 | 计划 |
 |---|---|---|
-| 适配器 | 只有 Binance | P1：OKX/Bybit/Gate/Bitget/HTX/Hyperliquid/KuCoin/MEXC |
+| 适配器 | **8 家已接入**（OKX/Bybit/Gate/Bitget/KuCoin/MEXC/HTX/Hyperliquid），Binance 关闭 | 下一批：BitMEX/Deribit（当前网络不可达）|
 | `top_n` 排序 | 按字母序（不是成交额） | P2：用上一轮 `quote_volume` 排名，改成真正的活跃合约 |
 | 现货 / 标记价 | 代码已支持，配置未开 | 需要基差研究时把 `spot`/`mark` 加进 `data` |
 | 回灌 | 只有表（`backfill_job`），无进程 | P2：`backfill.py`，先抢 OI 30 天窗口 |
 | 审计 | 无 | P2：`audit.py` + 与 `data.binance.vision` 对账 |
 | MQTT | 代码就绪，本机未装 dove → 降级为日志 | 装 dove 或在容器里挂载后自动启用 |
 | 调度 | 手动 CLI | P2：systemd timer（HH:02）|
+
+---
+
+## 15. 八所接入结果（P0 实测，2026-10-28）
+
+Binance 关闭（生产库 `quant.kline_futures_1h` 已有其历史），其余 8 家全部接入并写入 `cryptos`。
+
+### 15.1 一轮全量同步（每家 30 合约 × 6 小时窗口）
+
+| 交易所 | 状态 | 合约数 | 行数 | 耗时 | 错误 |
+|---|---|---|---|---|---|
+| okx | synced | 30 | 224 | 11.7s | 0 |
+| bybit | synced | 30 | 378 | 15.9s | 0 |
+| gate | synced | 30 | 371 | 22.4s | 0 |
+| bitget | synced | 30 | 224 | 17.5s | 0 |
+| kucoin | synced | 30 | 227 | 15.6s | 0 |
+| mexc | synced | 30 | 218 | 20.6s | 0 |
+| htx | synced | 30 | 213 | 25.9s | 0 |
+| hyperliquid | synced | 30 | 390 | 31.1s | 0 |
+
+**整轮墙钟 31 秒**（8 家并行，由最慢的 Hyperliquid 决定），远低于 50 分钟预算。
+按 300 合约线性外推约 5–6 分钟。
+
+### 15.2 OI 能力矩阵（这是各所最大的差异）
+
+| 交易所 | OI 历史 | 实测行为 | 回补可能性 |
+|---|---|---|---|
+| **Gate** | **180 天** | `contract_stats` 逐小时返回 | ✅ 可回补 6 个月 |
+| **Bybit** | **约 8 天** | `open-interest` 每页 200 条 | ⚠️ 只能回补一周 |
+| OKX | ❌ 无 | `public/open-interest` 只给当前值 | 只能增量积累 |
+| Bitget | ❌ 无 | 传入 startTime/endTime 被忽略 | 只能增量积累 |
+| KuCoin | ❌ 无 | 从 `contracts/active` 取当前值 | 只能增量积累 |
+| MEXC | ❌ 无 | ticker 的 `holdVol` 为当前值 | 只能增量积累 |
+| HTX | ❌ 无 | `swap_open_interest` 只给当前值 | 只能增量积累 |
+| Hyperliquid | ❌ 无 | `metaAndAssetCtxs` 的 ctx 为当前值 | 只能增量积累 |
+
+对无历史接口的 6 家，适配器采用**快照模式**：每次同步写入"上一整点"的一条 OI 记录。
+这也是为什么 §11 说 OI 必须 Day 1 上线——**这 6 家的 OI 历史从今天开始才有**。
+
+### 15.3 各所接口陷阱（全部实测踩过）
+
+| 交易所 | 陷阱 | 后果 |
+|---|---|---|
+| **Gate** | 时间戳是**秒**不是毫秒；`candlesticks` 不允许 `limit` 与 `from/to` 同时出现（400）| 写错会整体偏移 1000 倍 / 直接 400 |
+| **MEXC** | K线是**列式**结构 `{time:[], open:[], ...}`，不是行数组 | 按行解析会得到空数据 |
+| **KuCoin** | `from/to` 必须是**毫秒**；单页最多 **200** 根 | 传秒返回空数组（不报错，最难发现）|
+| **Hyperliquid** | 全部 POST `/info`；`fundingHistory` 只传 `startTime`（传 `endTime` 返回空）；funding **每小时** | funding 会凭空少一半 |
+| **HTX** | 域名是 `hbdm.com`；响应是 `{status, data}` 双层包装 | 取错层级拿到空 |
+| **OKX** | 合约字段是 `settleCcy` 不是 `settCcy`；candles 最新在前，翻页用 `after` | 写成 settCcy 会筛出 0 个合约，且**不报错** |
+| **Bitget** | `granularity=1H`（不是 60）；funding 分页用 pageNo 且最新在前 | — |
+| **Bybit** | kline 最新在前；OI `intervalTime=1h` 且只留约 8 天 | — |
+
+另外两个通用教训：
+1. **空宇宙必须报警**：OKX 字段写错导致 0 个合约，最初却报 `synced` —— 现在 universe 为空会标 `partial` 并记错误。
+2. **`BTC` 不能当子串匹配**：会把 `AIXBT_USDT`、`WBTC_USDT` 一起选进来。现在按 `base` 精确匹配，`raw_code` 精确次之，子串仅作兜底。
+
+### 15.4 跨所一致性校验（最强的一条正确性证据）
+
+同一小时（2026-10-27 23:00 UTC）8 家 BTC-USDT 收盘价：
+
+| 交易所 | close | 相对中位价 |
+|---|---|---|
+| bitget | 80873.3 | 0.0 bp |
+| bybit | 80873.8 | +0.1 bp |
+| gate | 80868.7 | −0.5 bp |
+| htx | 80872.5 | −0.0 bp |
+| hyperliquid | 80889.0 | +2.0 bp |
+| kucoin | 80871.2 | −0.2 bp |
+| mexc | 80868.4 | −0.6 bp |
+| okx | 80881.4 | +1.1 bp |
+
+**全部分布在 ±2bp 内**。8 个独立实现解析出同一根 bar，这比任何单所自检都可靠——
+时间偏移、单位（张/币）、时区任何一种错误都会远超 2bp。
+
+时间戳抖动检查：`uniqExact(toUnixTimestamp64Milli(open_time) % 1000)` 在 kline/funding/oi 三张表均为 **0**。
 
 
 
