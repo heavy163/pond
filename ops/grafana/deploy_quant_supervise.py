@@ -140,11 +140,54 @@ SELECT toStartOfDay(t) AS time, round(avg(sd) * 1e4, 1) AS "日均离散度(bp)"
 FROM (SELECT t, stddevPop(r1) AS sd FROM j WHERE isFinite(r1) GROUP BY t)
 GROUP BY toStartOfDay(t) ORDER BY time"""
 
+# 三台机器的本金差一个数量级（约 2.7k / 4.2k / 25k），直接画原值小账户会被压成直线。
+# 归一化到窗口起点 = 100，才是可比口径；绝对规模另开一个合计面板。
 SQL_WALLET = f"""
-SELECT datetime AS time, machine AS "机器", value AS "净值"
-FROM quant.future_wallet
-WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
+WITH w AS (
+    SELECT datetime AS time, machine, value
+    FROM quant.future_wallet
+    WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
+),
+b AS (SELECT machine, argMin(value, time) AS base FROM w GROUP BY machine)
+SELECT w.time AS time, w.machine AS "机器", w.value / b.base * 100 AS "净值(起点=100)"
+FROM w INNER JOIN b USING (machine)
 ORDER BY time"""
+
+# 三台机器不是同一分钟上报（xx:00:57 / xx:01:01 / xx:01:07），按小时加总会把
+# "某台还没报"算成净值少了 4.5k，曲线出现假跳水。用 ASOF JOIN 前向填充到各自的最后已知值。
+SQL_WALLET_TOTAL = f"""
+WITH w AS (
+    SELECT machine, toStartOfHour(datetime) AS h, argMax(value, datetime) AS v
+    FROM quant.future_wallet
+    WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
+    GROUP BY machine, h
+)
+SELECT g.h AS time, round(sum(w2.v), 2) AS "合计净值(USDT)"
+FROM (SELECT hours.h AS h, machines.machine AS machine
+      FROM (SELECT DISTINCT h FROM w) AS hours
+      CROSS JOIN (SELECT DISTINCT machine FROM w) AS machines) AS g
+ASOF LEFT JOIN w AS w2 ON g.machine = w2.machine AND g.h >= w2.h
+GROUP BY g.h ORDER BY time"""
+
+SQL_WALLET_STATS = f"""
+WITH w AS (
+    SELECT machine, datetime AS time, value
+    FROM quant.future_wallet
+    WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
+),
+d AS (
+    SELECT machine, time, value,
+           max(value) OVER (PARTITION BY machine ORDER BY time
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak
+    FROM w
+)
+SELECT machine AS `机器`,
+       round(argMin(value, time), 2) AS `起点`,
+       round(argMax(value, time), 2) AS `末值`,
+       round((argMax(value, time) / argMin(value, time) - 1) * 100, 2) AS `区间收益%`,
+       round(min(value / peak - 1) * 100, 2) AS `最大回撤%`,
+       count() AS `快照数`
+FROM d GROUP BY machine ORDER BY `区间收益%` DESC"""
 
 SQL_PORT_RET = f"""
 WITH w AS (
@@ -363,9 +406,15 @@ y += 8
 
 # ③ 策略实盘
 P.append(row(nid(), "③ 策略实盘：吃到了多少", y)); y += 1
-P.append(ts(nid(), "净值曲线（neutral_v1 各机器）", SQL_WALLET, 0, y, 12, 8, unit="none",
-            desc="多台机器的净值。曲线分叉=不同机器持仓/成交差异。"))
-P.append(ts(nid(), "组合每小时收益（bp）", SQL_PORT_RET, 12, y, 12, 8, unit="none",
+P.append(ts(nid(), "净值曲线（各机器归一化，窗口起点=100）", SQL_WALLET, 0, y, 12, 8, unit="none",
+            desc="三台机器本金差一个数量级（≈2.7k / 4.2k / 25k USDT），原值画在一张图上小账户会被压平。"
+                 "这里各自归一化到窗口起点=100，看的是相对表现；绝对规模见右侧合计面板。"))
+P.append(ts(nid(), "合计净值（USDT）", SQL_WALLET_TOTAL, 12, y, 12, 8, unit="usd",
+            desc="三台机器净值按小时加总，看绝对规模的变化。"))
+y += 8
+P.append(table(nid(), "各机器表现（窗口内）", SQL_WALLET_STATS, 0, y, 12, 6,
+               desc="起点/末值/区间收益/最大回撤。哪台机器明显跟不上，通常是持仓或成交链路的问题。"))
+P.append(ts(nid(), "组合每小时收益（bp）", SQL_PORT_RET, 12, y, 12, 6, unit="none",
             desc="按各机器净值加权的小时收益。"))
 y += 8
 P.append(ts(nid(), "持仓宽度（多/空 品种数）", SQL_POS_WIDTH, 0, y, 12, 8, unit="none",
