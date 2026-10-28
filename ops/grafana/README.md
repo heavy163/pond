@@ -1,0 +1,82 @@
+# Grafana 数据同步监控（cryptos）
+
+把 `cryptos` 库的采集健康度暴露到 Grafana 11.1.4（`http://192.168.1.4:3000`），
+**不改动任何既有看板**，全部落在独立文件夹 `Cryptos` 下。
+
+## 交付物
+
+| 入口 | 地址 |
+|---|---|
+| 看板 | `http://192.168.1.4:3000/d/cryptos-monitor` |
+| 文件夹 | `Cryptos`（uid `cg2kk23urwdmob`） |
+| 告警规则 | Alerting → Alert rules → folder `Cryptos`（组 `cryptos-sync`，9 条） |
+
+数据源复用已有的 `grafana-clickhouse-datasource`（uid `edvdze371o5q8f`，
+`192.168.1.200:9000` native protocol，无密码）。**没有新建数据源。**
+
+## 重新部署
+
+```bash
+cd /mnt/hgfs/e/workspace/FutureTradeDev/pond
+/usr/bin/python3.12 ops/grafana/deploy_dashboard.py   # 6 个面板（幂等，按 uid 覆盖）
+/usr/bin/python3.12 ops/grafana/deploy_alerts.py      # 9 条规则（幂等，按 title upsert）
+/usr/bin/python3.12 ops/grafana/deploy_alerts.py --only 3   # 只动第 3 条
+```
+
+凭证：`~/.hermes/secrets/grafana_token`（Grafana service account token，600 权限，**不入库**）。
+可用环境变量 `GRAFANA_URL` / `GRAFANA_TOKEN_FILE` 覆盖。
+
+## 看板面板
+
+| # | 面板 | 判读 |
+|---|---|---|
+| ① | 同步状态（最近一轮） | `status != synced` 即异常 |
+| ② | 数据新鲜度（滞后小时） | 健康值 1~2h（最新**已收盘**整点）；>2.5h 落后一轮，>3.5h 停更 |
+| ③ | 未来/未收盘 bar | 必须是 0 |
+| ④ | 覆盖率台账 | `lost` 只应出现在 `oi` |
+| ⑤ | 跨所价差（BTC） | 正常 ±2bp |
+| ⑥ | 各所 K 线行数（24h） | 骤降=换池或大量失败 |
+
+## 告警规则（9 条）
+
+| 级别 | 规则 | 判据 | 为什么需要 |
+|---|---|---|---|
+| P1 | 整家交易所停更 | 最大滞后 > 3h | 停机 |
+| P1 | 同步失败 | 最近一轮 status != synced | 请求层失败 |
+| P1 | 出现未来/未收盘 bar | > 0 | **`sync_stat` 永远发现不了**，MEXC 曾写进 247 行 |
+| P1 | 永久丢失新增 | `lost` 且 `data_type != 'oi'` | K线/funding 本该 100% 可补，lost=架构异常 |
+| P2 | 可补缺口新增 | 近 2 日 `gap` > 0 | 等修复任务补回 |
+| P2 | 跨所价差异常 | 偏离中位 > 50bp | 数据或合约错 |
+| P2 | 采集码数骤降 | 近 3 个已收盘小时 vs 昨日同期 -20% | 换池未生效 |
+| P2 | OI 永久丢失量激增 | 当日 oi lost > 250（基线 177） | 停机时间变长 |
+| P3 | 汇率异常 | KRW/USD 日变动 > 2% | 影响 Korea premium 口径 |
+
+**为什么 `lost` 要排除 `oi`**：6 家快照所（okx/bitget/kucoin/mexc/htx/hyperliquid）不提供
+OI 历史接口，停机即永久丢。这是架构固有限制，天天响就是告警疲劳。真正的事故是
+**K线/funding 出现 lost**——那三类理论上 100% 可补。
+
+## 邮件通道（**当前未打通**）
+
+Grafana 侧现状：
+- 联系点只有一个 `email receiver`，地址仍是占位符 `<example@email.com>`
+- `grafana.ini` 没有 `[smtp]` 段，`/api/frontend/settings` 里无任何 `smtp*` 字段
+- 联系点测试接口返回 **HTTP 400**（无法投递）
+
+要打通需要在 Grafana 所在机器（192.168.1.4）的 `grafana.ini` 加：
+
+```ini
+[smtp]
+enabled = true
+host = smtp.example.com:465
+user = alert@example.com
+password = <授权码，不要用登录密码>
+from_address = alert@example.com
+from_name = Grafana Cryptos
+skip_verify = false
+```
+
+重启 Grafana 后，把 `email receiver` 的 `addresses` 改成真实收件地址（多个用分号分隔），
+再跑一次联系点测试，返回 200 才算通。
+
+飞书 webhook 后续替换时，只需新增一个 `webhook` 类型联系点 + 在
+`notification policies` 里把 `Cryptos` 文件夹路由过去，规则本身不用改。
