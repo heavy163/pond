@@ -1301,3 +1301,41 @@ hyperliquid synced         30       390     31.0s       0
 ```
 
 `ExecStart` exit=0，CPU 7.87s，墙上 31s。`sync_stat` 新增 8 行。
+
+### 17.7 端到端验证（不是"配好了"，是"真的跑过"）
+
+验证方式：临时加一条一次性 drop-in `OnCalendar=2026-10-28 09:10:00`，等定时器自己把
+service 拉起来，然后删掉 drop-in 恢复 `:02`。
+
+```
+09:10:18  Starting cryptos-sync.service ...          ← timer 触发
+09:10:50  Finished cryptos-sync.service              ← 8/8 synced，exit 0
+09:10:18  LAST（list-timers 记录）                    ← 定时器确实执行过
+NEXT      10:02:00                                   ← 已恢复整点 :02
+```
+
+重启后能否继续跑，取决于两个开关，都已确认：
+
+| 开关 | 状态 | 说明 |
+|---|---|---|
+| `loginctl Linger` | **yes** | 用户登出/未登录时 user timer 仍运行 |
+| `systemctl --user is-enabled` | enabled | 已挂进 `timers.target.wants` |
+
+> 如果哪天 Linger 被关掉，定时器只在用户登录期间生效——这是 user timer 最常见的坑。
+
+### 17.8 幂等重写的代价（实测）
+
+每小时重写 6 小时窗口 = 6 倍写放大。实测重复行比例：
+
+| venue | raw 行 | 去重后 | 比例 |
+|---|---|---|---|
+| okx / htx / bitget / hyperliquid | 228 | 228 | **1.00** |
+| bybit / gate / mexc | 234 | 228 | 1.03 |
+| kucoin | 231 | 225 | 1.03 |
+
+Merge 跟得上，比例接近 1.0。按 300 合约外推，每小时写 8 家 × 300 × 6 ≈ 14,400 行，
+对 ClickHouse 是噪声级别。**暂时不需要 `OPTIMIZE FINAL`**；等库到 GB 级再看。
+
+真正的成本不在写入，而在**重复下载**：6 小时窗口里有 5 小时是已有的。
+降到 2 小时能省 2/3 请求，但漏一轮就出现数据缺口。
+考虑到 8 家馆轮只花 31 秒、配额远未用满，**保留 6 小时换容错**是划算的。
