@@ -95,6 +95,10 @@ def cmd_loop(args) -> int:
     """常驻：整点后第 5 分钟跑一轮（交易所 K 线在整点收盘，留 5 分钟给数据落定）。"""
     logger.info(f"recorder loop 启动，db={args.db}，保留 {args.retain_days} 天")
     last_prune = 0.0
+    if args.run_now:          # 部署后立刻采一轮，不用干等下一个 :05
+        logger.info("[loop] --run-now：先跑一轮")
+        asyncio.run(run_once(args))
+        last_prune = time.monotonic()
     while True:
         now = datetime.now(timezone.utc)
         nxt = now.replace(minute=5, second=0, microsecond=0)
@@ -157,6 +161,7 @@ def main() -> int:
     p = sub.add_parser("loop")
     p.add_argument("--retain-days", type=int, default=365)
     p.add_argument("--max-size-gb", type=float, default=None)
+    p.add_argument("--run-now", action="store_true", help="启动时立刻跑一轮（默认等到下一个 :05）")
     p.set_defaults(func=cmd_loop)
 
     p = sub.add_parser("prune")
