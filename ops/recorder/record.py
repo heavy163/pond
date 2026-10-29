@@ -82,7 +82,7 @@ async def run_once(args) -> int:
 
     print(f"\n合计 {total:,} 行，{len(results)} 家，非 synced {bad} 家，"
           f"总耗时 {time.monotonic()-t0:.1f}s")
-    print(f"SQLite: {store.path}  {store.path.stat().st_size/1e6:.1f} MB")
+    print(f"SQLite: {store.path}  {store.stats()['size_mb']:.1f} MB")  # stats 内部会 checkpoint，读到真实大小
     store.finalize()
     return 0 if bad == 0 else 1
 
