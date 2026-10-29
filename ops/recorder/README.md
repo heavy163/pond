@@ -105,6 +105,10 @@ journalctl -u cryptos-recorder -f
 **磁盘**：1 年 × 9 所 × 约 800 标的 × 每小时 ≈ **每所每年 150~250 MB**，全部约 2 GB。
 预留 10 GB 足够。
 
+**内存**：9 家同时录制实测 **均值 123 MB / 峰值 166 MB**（含 SQLite 页缓存），
+1 核 **512 MB** 足够，256 MB 偏紧。SQLite 页缓存默认 32 MB，可用
+`RECORDER_SQLITE_CACHE_MB` 调整（64 MB 时峰值 166 MB，32 MB 约省 30 MB）。
+
 ---
 
 ## 5. 保留期与动态清理
