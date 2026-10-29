@@ -1,0 +1,622 @@
+{
+  "tables": [
+    {
+      "db": "quant",
+      "name": "1h_generated_v3_V3_0_0",
+      "rows": 12310093,
+      "size": "50.38 GiB"
+    },
+    {
+      "db": "quant",
+      "name": "baostock_kline_1d_hfq",
+      "rows": 13927207,
+      "size": "997.30 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "baostock_kline_5m",
+      "rows": 438350204,
+      "size": "11.67 GiB"
+    },
+    {
+      "db": "quant",
+      "name": "bond_kline_1d",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "bond_kline_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "cn_futures_kline_1d",
+      "rows": 163977,
+      "size": "4.69 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "crypto_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "crypto_prediction",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "factor_oi_v1",
+      "rows": 10491956,
+      "size": "1.82 GiB"
+    },
+    {
+      "db": "quant",
+      "name": "factor_online_v4",
+      "rows": 10492269,
+      "size": "4.70 GiB"
+    },
+    {
+      "db": "quant",
+      "name": "fund_kline_daily_hfq",
+      "rows": 1396645,
+      "size": "44.16 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "future_funding_rate",
+      "rows": 3079540,
+      "size": "24.70 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "future_long_short_position_ratio",
+      "rows": 6581067,
+      "size": "48.08 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "future_position",
+      "rows": 1124263,
+      "size": "7.02 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "future_wallet",
+      "rows": 146424,
+      "size": "1.19 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "futures_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "futures_prediction",
+      "rows": 11503589,
+      "size": "199.77 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "futures_prediction_v2",
+      "rows": 11146218,
+      "size": "191.46 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "hk_kline_1d",
+      "rows": 8655329,
+      "size": "248.54 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "kline_daily_hfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_daily_nfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_futures_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_futures_1d",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_futures_1h",
+      "rows": 12732768,
+      "size": "669.51 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "kline_futures_4h",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_futures_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "kline_spot_1h",
+      "rows": 12336774,
+      "size": "612.36 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "stock_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "stock_kline_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "stock_kline_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "stock_kline_hfq_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant",
+      "name": "stock_prediction",
+      "rows": 4435453,
+      "size": "61.62 MiB"
+    },
+    {
+      "db": "quant",
+      "name": "stock_prediction_gnn",
+      "rows": 4122416,
+      "size": "72.02 MiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "1h_generated_v3_V3_0_0",
+      "rows": 8303336,
+      "size": "33.92 GiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "baostock_kline_1d_hfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "baostock_kline_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "bond_kline_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "crypto_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "crypto_prediction",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "factor_v4",
+      "rows": 8191470,
+      "size": "9.76 GiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "fund_kline_daily_hfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "future_funding_rate",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "future_long_short_position_ratio",
+      "rows": 6215187,
+      "size": "43.70 MiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "future_position",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "future_wallet",
+      "rows": 94304,
+      "size": "734.67 KiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "futures_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "futures_prediction",
+      "rows": 17640583,
+      "size": "325.98 MiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_daily_hfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_daily_nfq",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_futures_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_futures_1d",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_futures_1h",
+      "rows": 8409250,
+      "size": "444.43 MiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_futures_4h",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_futures_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "kline_spot_1h",
+      "rows": 6764480,
+      "size": "335.54 MiB"
+    },
+    {
+      "db": "quant_v4",
+      "name": "stock_factor",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "stock_kline_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "stock_kline_5m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "stock_kline_hfq_15m",
+      "rows": 0,
+      "size": "0.00 B"
+    },
+    {
+      "db": "quant_v4",
+      "name": "stock_prediction",
+      "rows": 0,
+      "size": "0.00 B"
+    }
+  ],
+  "factor_table": {
+    "table": "quant.1h_generated_v3_V3_0_0",
+    "n_cols": 637,
+    "n_feature_cols": 635,
+    "n_families": 106,
+    "horizons": [
+      6,
+      12,
+      24,
+      72,
+      120,
+      168
+    ],
+    "n_codes": 576,
+    "n_rows": 12280413,
+    "min_close_time": "2021-01-01 00:00:00+08:00",
+    "max_close_time": "2026-10-29 00:00:00+08:00",
+    "families": {
+      "corr_pc": 6,
+      "corr_pcratio": 6,
+      "corr_pv": 6,
+      "corr_pvratio": 6,
+      "corr_pv_mean": 6,
+      "corr_pv_std": 6,
+      "corr_pv_mean_p_sigma": 6,
+      "corr_pvdc": 6,
+      "corr_r1r": 6,
+      "corr_r1a": 6,
+      "corr_r2r": 6,
+      "corr_rc": 6,
+      "corr_rv": 6,
+      "corr_rvdc": 6,
+      "corr_rv1rank": 6,
+      "corr_rv2rank": 6,
+      "close_w_skew": 6,
+      "rtn_kurt": 6,
+      "rtn_kurt_l2": 6,
+      "rtn_skew": 6,
+      "rtn_skew_l2": 6,
+      "skew_i1m2": 6,
+      "skew_i2m1": 6,
+      "skew_i1btc2": 6,
+      "skew_i2btc1": 6,
+      "skew_i1pm2": 6,
+      "skew_i2pm1": 6,
+      "amihud1": 6,
+      "amihud2": 6,
+      "amihud1_var": 6,
+      "cvilliq": 6,
+      "flowinratio": 6,
+      "outflow_ratio": 6,
+      "outflow_ratio2": 6,
+      "big_order_rtn": 6,
+      "maxret": 6,
+      "max_rtn_tot0": 6,
+      "mdd": 6,
+      "mdd_min": 6,
+      "rs": 6,
+      "trad_mom": 6,
+      "trad_mom_diff1": 6,
+      "trad_mom_diff2": 6,
+      "trad_mom_l2": 6,
+      "trad_mom_res": 6,
+      "trend_strength": 6,
+      "last_p": 6,
+      "max_p": 6,
+      "last_qv": 6,
+      "adx": 6,
+      "avgline_prob": 6,
+      "aroon_down": 6,
+      "aroon_up": 6,
+      "aroon_osc": 6,
+      "atr": 6,
+      "boll_mid": 6,
+      "boll_std": 6,
+      "boll_down": 6,
+      "boll_pct": 6,
+      "boll_up": 6,
+      "cci": 6,
+      "chaikin1": 6,
+      "chaikin2": 6,
+      "cmo": 6,
+      "obv": 6,
+      "obv_taker": 6,
+      "obv_maker": 6,
+      "popularity": 6,
+      "psy": 6,
+      "roc_pct": 6,
+      "rsi": 6,
+      "rpp": 6,
+      "sharpe_ratio": 6,
+      "sortino_ratio": 6,
+      "beta": 6,
+      "betap": 6,
+      "beta_tobtc": 6,
+      "beta2": 6,
+      "betap2": 6,
+      "beta2_tobtc": 6,
+      "count_std": 6,
+      "idea_range": 6,
+      "r_std": 6,
+      "r_std_l2": 6,
+      "rv": 6,
+      "rv_l2": 6,
+      "rv_res": 6,
+      "rv_down": 6,
+      "rv_down_res": 6,
+      "rv_up_ratio": 6,
+      "stdprcvol": 6,
+      "avg_vol": 6,
+      "count_pct1": 6,
+      "count_pct2": 6,
+      "logc_pct_skew": 6,
+      "logvol_skew": 6,
+      "logvol_10tail": 6,
+      "logvol_90tail": 6,
+      "prc_vol": 6,
+      "qvdc": 6,
+      "qvdc_pct1": 6,
+      "vdc": 6,
+      "vdc_pct1": 6,
+      "v_ratio_roll": 6,
+      "vwap": 6,
+      "corr_r7r": 5
+    },
+    "daily_rows": [
+      {
+        "date": "2026-10-19",
+        "rows": 7875
+      },
+      {
+        "date": "2026-10-20",
+        "rows": 12587
+      },
+      {
+        "date": "2026-10-21",
+        "rows": 12576
+      },
+      {
+        "date": "2026-10-22",
+        "rows": 12576
+      },
+      {
+        "date": "2026-10-23",
+        "rows": 12549
+      },
+      {
+        "date": "2026-10-24",
+        "rows": 12528
+      },
+      {
+        "date": "2026-10-25",
+        "rows": 12528
+      },
+      {
+        "date": "2026-10-26",
+        "rows": 12528
+      },
+      {
+        "date": "2026-10-27",
+        "rows": 12528
+      },
+      {
+        "date": "2026-10-28",
+        "rows": 12514
+      },
+      {
+        "date": "2026-10-29",
+        "rows": 521
+      }
+    ],
+    "latest_codes": 521
+  },
+  "prediction": {
+    "max_datetime": "2026-10-29 00:00:00+08:00",
+    "n_codes": 512,
+    "n_rows_at_latest": 512,
+    "models": [
+      {
+        "model": "lgmb_train2y_hr72_sharpe",
+        "rows": 11503589,
+        "max_dt": "2026-10-29 00:00:00+08:00"
+      }
+    ],
+    "overlap_with_factor": 512
+  },
+  "position_quality": {
+    "rows_7d": 9296,
+    "filled_stake_ok": 397,
+    "open_price_ok": 1575,
+    "close_price_ok": 0,
+    "latest_close_ok": 0,
+    "pred_refreshed_ok": 9296,
+    "avg_refreshed_count": 60.09,
+    "filled_pct": 4.27,
+    "open_pct": 16.94,
+    "close_pct": 0.0,
+    "latest_close_pct": 0.0
+  },
+  "cohorts": [
+    {
+      "strategy_id": 0,
+      "gross": 11294.7,
+      "long_notional": 5647.3,
+      "short_notional": 5647.3,
+      "long_pairs": 30,
+      "short_pairs": 30
+    },
+    {
+      "strategy_id": 1,
+      "gross": 11927.5,
+      "long_notional": 5963.8,
+      "short_notional": 5963.8,
+      "long_pairs": 30,
+      "short_pairs": 30
+    },
+    {
+      "strategy_id": 2,
+      "gross": 11294.7,
+      "long_notional": 5647.3,
+      "short_notional": 5647.3,
+      "long_pairs": 30,
+      "short_pairs": 30
+    }
+  ],
+  "gross_total": 34516.9,
+  "wallets": [
+    {
+      "machine": "http://43.133.207.73:5918",
+      "value": 4527.22,
+      "last": "2026-10-29 00:00:56.831000+08:00"
+    },
+    {
+      "machine": "http://43.153.152.139:5918",
+      "value": 30531.75,
+      "last": "2026-10-29 00:01:10.903000+08:00"
+    },
+    {
+      "machine": "http://43.167.224.202:5918",
+      "value": 3244.81,
+      "last": "2026-10-29 00:01:00.406000+08:00"
+    }
+  ],
+  "equity_total": 38303.78,
+  "exposure_pct": 90.1,
+  "kline": {
+    "max_open_time": "2026-10-28 23:00:00+08:00",
+    "rows_2d": 20396
+  },
+  "funding": {
+    "max_datetime": "2026-07-17 13:00:00.001000+08:00",
+    "rows": 3079540
+  },
+  "dashboard": {
+    "uid": "quant-supervise-v2",
+    "panels": 25,
+    "dev_file": "ops/grafana/deploy_quant_supervise.py"
+  }
+}
