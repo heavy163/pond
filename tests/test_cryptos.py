@@ -347,14 +347,21 @@ def test_spot_backfill_path_exists():
 # ---------------- 未来数据拦截 ----------------
 
 
-def test_drop_future_rows_kline():
-    """MEXC 会返回下一小时的 bar，必须在入库前丢掉（实测踩过 247 行）。"""
+def test_drop_future_rows_kline(monkeypatch):
+    """MEXC 会返回下一小时的 bar，必须在入库前丢掉（实测踩过 247 行）。
+
+    时钟必须固定：drop_future_rows 的上限是「真实 now + 5 分钟」，而这里
+    构造的是「整点 now + 1 小时」。若用真实时钟，在每小时的 :55~:00 跑，
+    上限会越过下一根 bar，测试就会假失败（踩过）。
+    """
     import datetime as dt
 
+    import pond.cryptos.store as store_mod
     from pond.cryptos.schema import TABLE_KLINE_FUT
     from pond.cryptos.store import drop_future_rows
 
-    now = dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    now = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(store_mod, "now_utc", lambda: now)
 
     def row(open_time):
         return {"venue": "v", "code": "X-USDT", "open_time": open_time,
