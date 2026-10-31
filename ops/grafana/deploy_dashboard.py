@@ -146,12 +146,16 @@ PANELS = [
     # ---------- 数据量可视化 ----------
     panel(
         7, "⑦ 各所每小时 K 线根数（近 24h）",
-        """SELECT toStartOfHour(open_time) AS time, venue, count() AS bars
+        """SELECT toStartOfHour(open_time) AS time, venue,
+                  uniqExact(open_time, code) AS bars
            FROM cryptos.kline_futures_1h
            WHERE open_time >= now() - INTERVAL 24 HOUR
            GROUP BY time, venue ORDER BY time""",
         0, 15, 12, 8, ptype="timeseries", fmt=1,
-        desc="每所每小时应≈码数（28~30）。2026-10-27 20:00~10-28 05:00 出现 57 根属历史异常（修复任务当时在维护出池的旧码，已修），会随 24h 窗口滚出。",
+        desc=("每根 K 线 = 一个 (code, open_time)，所以这应该是每个所一条近乎水平的线。"
+              "必须用 uniqExact 而不是 count()：回看 6 小时会把同一批 bar 重写 6 遍，"
+              "ReplacingMergeTree 在后台合并前 count() 会把同一根算 1.2~1.7 次，"
+              "曲线随合并节奏上下跳——那是引擎的合并状态，不是数据量在变。"),
     ),
     panel(
         8, "⑧ 各所 × 数据类型 24h 行数",
@@ -180,16 +184,20 @@ PANELS = [
            WHERE open_time >= now() - INTERVAL 24 HOUR
            GROUP BY time, venue ORDER BY time""",
         0, 23, 8, 7, ptype="timeseries", fmt=1,
-        desc="码数应恒定（27~30）。跳变说明换池、或修复任务在维护出池的旧码。",
+        desc=("每小时的去重码数，基本是水平线。小幅波动来自该小时确实没有成交的合约"
+              "（交易所不返回空 bar），实测 kucoin 695~703；断崖式跳变才是换池或停采。"),
     ),
     panel(
         10, "⑩ OI 每小时采集条数（近 24h）",
-        """SELECT toStartOfHour(datetime) AS time, venue, count() AS rows
+        """SELECT toStartOfHour(datetime) AS time, venue,
+                  uniqExact(datetime, code) AS rows
            FROM cryptos.open_interest
            WHERE datetime >= now() - INTERVAL 24 HOUR
            GROUP BY time, venue ORDER BY time""",
         8, 23, 8, 7, ptype="timeseries", fmt=1,
-        desc="OI 是快照数据，每小时一轮。断档 = 那一小时永久丢失（6 家所无历史可补）。",
+        desc=("OI 是快照，每小时一轮、每个合约一条，所以应是水平线。同样用 uniqExact 而非 count()："
+              "重写会让物理行翻倍（gate 实测 1.69x），合并前看着像暴涨。"
+              "断档 = 那一小时永久丢失（6 家所无历史可补）；mexc 的 851~1000 是真实缺合约。"),
     ),
     panel(
         11, "⑪ 累计数据量（全库）",

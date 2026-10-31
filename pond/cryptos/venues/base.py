@@ -110,8 +110,28 @@ class VenueAdapter(ABC):
             self._observe_quota(endpoint, resp)
 
             if code == 200:
+                # 有的交易所把「限流」塞在 200 里：mexc 实测返回
+                #   {"success": false, "code": 510, "message": "Requests are too frequent"}
+                # 只看 HTTP 状态会把这种响应当成成功 → data=None → 适配器返回 [] →
+                # 该合约这一小时静默没有 OI，而 status 仍是 synced、errors=0。
+                # 实测 mexc 每小时约 20% 的合约以这种方式被丢掉（且是轮换的，很难发现）。
+                payload = resp.json()
+                if isinstance(payload, dict) and payload.get("success") is False:
+                    msg = str(payload.get("message") or "")
+                    low = msg.lower()
+                    if payload.get("code") == 510 or "frequent" in low or "too many" in low \
+                            or "rate" in low:
+                        self.stats["biz_rate_limit"] += 1
+                        wait = min(2.0 ** attempt, 30.0)
+                        logger.warning(f"[{self.name}] 业务级限流(200) 暂停 {wait:.1f}s（{endpoint}）")
+                        lim.pause(wait)
+                        last_exc = RetriesExhausted(f"{self.name} 业务限流: {msg[:80]}")
+                        await self._backoff(attempt)
+                        continue
+                    self.breaker.record(True)
+                    raise BadRequest(f"{self.name} success=false: {msg[:160]}")
                 self.breaker.record(True)
-                return resp.json()
+                return payload
 
             if code == 429:
                 self.stats["http_429"] += 1
