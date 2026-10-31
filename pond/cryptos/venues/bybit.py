@@ -26,6 +26,18 @@ class BybitAdapter(VenueAdapter):
     BASE = "https://api.bybit.com"
     _px: dict[str, float] | None = None      # ticker 价格缓存（本轮内有效）
 
+    def _biz_status(self, payload):
+        # bybit：{"retCode":10006,"retMsg":"Too many visits"}，HTTP 200
+        if not isinstance(payload, dict):
+            return None
+        ret = payload.get("retCode")
+        if ret in (0, None, "0"):
+            return None
+        msg = f'bybit retCode={ret} {payload.get("retMsg") or ""}'.strip()
+        if ret in {10006, 10018} or "too many" in msg.lower() or "rate limit" in msg.lower():
+            return ("rate", msg)
+        return ("other", msg)
+
     async def instruments(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         cursor = ""

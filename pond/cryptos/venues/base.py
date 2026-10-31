@@ -110,26 +110,26 @@ class VenueAdapter(ABC):
             self._observe_quota(endpoint, resp)
 
             if code == 200:
-                # 有的交易所把「限流」塞在 200 里：mexc 实测返回
-                #   {"success": false, "code": 510, "message": "Requests are too frequent"}
-                # 只看 HTTP 状态会把这种响应当成成功 → data=None → 适配器返回 [] →
-                # 该合约这一小时静默没有 OI，而 status 仍是 synced、errors=0。
-                # 实测 mexc 每小时约 20% 的合约以这种方式被丢掉（且是轮换的，很难发现）。
+                # 交易所会把「限流 / 报错」塞在 HTTP 200 的响应体里（见 _biz_status）。
+                # 只看状态码会把它当成成功 → data=None → 适配器返回 [] →
+                # 该合约这一小时静默没有数据，而 status 仍是 synced、errors=0。
                 payload = resp.json()
-                if isinstance(payload, dict) and payload.get("success") is False:
-                    msg = str(payload.get("message") or "")
-                    low = msg.lower()
-                    if payload.get("code") == 510 or "frequent" in low or "too many" in low \
-                            or "rate" in low:
+                biz = self._biz_status(payload)
+                if biz:
+                    kind, msg = biz
+                    if kind == "rate":
                         self.stats["biz_rate_limit"] += 1
                         wait = min(2.0 ** attempt, 30.0)
-                        logger.warning(f"[{self.name}] 业务级限流(200) 暂停 {wait:.1f}s（{endpoint}）")
+                        logger.warning(
+                            f"[{self.name}] 业务级限流(200) 暂停 {wait:.1f}s（{endpoint}）: {msg[:90]}"
+                        )
                         lim.pause(wait)
                         last_exc = RetriesExhausted(f"{self.name} 业务限流: {msg[:80]}")
                         await self._backoff(attempt)
                         continue
-                    self.breaker.record(True)
-                    raise BadRequest(f"{self.name} success=false: {msg[:160]}")
+                    # 非限流的业务错误（如「合约不存在」）：不重试，但必须留痕
+                    self.stats["biz_error"] += 1
+                    self._note_biz_error(msg)
                 self.breaker.record(True)
                 return payload
 
@@ -193,6 +193,24 @@ class VenueAdapter(ABC):
                     self.limiter(endpoint).slow_down(0.5)
             except ValueError:
                 pass
+
+    # ---------------- 业务层状态码（HTTP 200 里的错误） ----------------
+
+    def _biz_status(self, payload: Any) -> tuple[str, str] | None:
+        """检查响应体里的业务状态。返回 (kind, msg)，kind ∈ {'rate','other'}；None = 正常。
+
+        为什么必须有这一层：okx / bybit / htx / mexc / kucoin 在限流或参数错误时
+        都返回 **HTTP 200** + 一个错误信封，而 data/result 为空。
+        只看状态码的代码会把它当成「这个合约没数据」——静默丢一整小时的行情，
+        且 status 仍是 synced、errors=0。mexc 实测每小时丢掉 20% 合约的 OI。
+        """
+        return None
+
+    def _note_biz_error(self, msg: str) -> None:
+        """非限流业务错误：节流打印，避免一个坏 symbol 刷屏。"""
+        n = self.stats["biz_error"]
+        if n <= 5 or n % 200 == 0:
+            logger.warning(f"[{self.name}] 业务错误(200) #{n}: {msg[:120]}")
 
     # ---------------- 子类必须实现 ----------------
 

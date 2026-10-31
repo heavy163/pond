@@ -27,6 +27,19 @@ class HtxAdapter(VenueAdapter):
     name = "htx"
     BASE = "https://api.hbdm.com"
 
+    def _biz_status(self, payload):
+        # htx：{"status":"error","err-code":"invalid-parameter"}，HTTP 200
+        if not isinstance(payload, dict):
+            return None
+        st = payload.get("status")
+        if st is None or st == "ok":
+            return None
+        ec = str(payload.get("err-code") or "")
+        msg = f'htx {ec} {payload.get("err-msg") or ""}'.strip()
+        if "too-many" in ec or "frequency" in ec or "rate" in ec or "too many" in msg.lower():
+            return ("rate", msg)
+        return ("other", msg)
+
     async def instruments(self) -> list[dict[str, Any]]:
         d = await self.request(
             f"{self.BASE}/linear-swap-api/v1/swap_contract_info",

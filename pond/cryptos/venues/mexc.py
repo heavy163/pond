@@ -31,6 +31,16 @@ class MexcAdapter(VenueAdapter):
         super().__init__(spec)
         self._size: dict[str, float] = {}     # raw symbol → contractSize
 
+    def _biz_status(self, payload):
+        # mexc：{"success":false,"code":510,"message":"Requests are too frequent"}，HTTP 200
+        if not isinstance(payload, dict) or payload.get("success") is not False:
+            return None
+        code = payload.get("code")
+        msg = f'mexc code={code} {payload.get("message") or ""}'.strip()
+        if code == 510 or "frequent" in msg.lower() or "too many" in msg.lower():
+            return ("rate", msg)
+        return ("other", msg)
+
     async def instruments(self) -> list[dict[str, Any]]:
         d = await self.request(f"{self.BASE}/contract/detail", endpoint="meta", cost=2)
         out: list[dict[str, Any]] = []

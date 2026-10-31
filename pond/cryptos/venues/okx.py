@@ -26,6 +26,18 @@ class OkxAdapter(VenueAdapter):
     name = "okx"
     BASE = "https://www.okx.com"
 
+    def _biz_status(self, payload):
+        # okx 错误也是 HTTP 200：{"code":"51001","msg":"...","data":[]}
+        if not isinstance(payload, dict):
+            return None
+        code = str(payload.get("code", "0"))
+        if code in ("0", "", "None"):
+            return None
+        msg = f'okx code={code} {payload.get("msg") or ""}'.strip()
+        if code in {"50011", "50013", "50040", "50061"} or "too many" in msg.lower():
+            return ("rate", msg)
+        return ("other", msg)
+
     async def instruments(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for inst_type in ("SWAP",):

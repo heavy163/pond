@@ -34,6 +34,18 @@ class KucoinAdapter(VenueAdapter):
         self._oi_cache: dict[str, float] = {}
         self._oi_ts: float = 0.0
 
+    def _biz_status(self, payload):
+        # kucoin：成功 code=200000；限流 429000
+        if not isinstance(payload, dict):
+            return None
+        code = str(payload.get("code", "200000"))
+        if code == "200000":
+            return None
+        msg = f"kucoin code={code}"
+        if code in {"429000", "400003"}:
+            return ("rate", msg)
+        return ("other", msg)
+
     async def instruments(self) -> list[dict[str, Any]]:
         d = await self.request(
             f"{self.BASE}/api/v1/contracts/active", endpoint="meta", cost=2
