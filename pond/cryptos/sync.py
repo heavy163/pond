@@ -321,6 +321,7 @@ class CryptoHelper:
             if again.status != FAILED:
                 res.status = again.status
                 res.rows = again.rows
+                res.codes = again.codes          # 不回填会让面板把这家的码数显示成 0
                 res.errors = again.errors
                 res.done = again.done
                 res.universe = again.universe
