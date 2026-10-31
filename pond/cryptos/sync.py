@@ -303,6 +303,7 @@ class CryptoHelper:
 
         done = {"n": 0}
         t_start = time.monotonic()
+        got: dict[str, int] = {}       # raw_code -> 这一轮实际拿到的行数
 
         async def one(raw: str) -> int:
             async with sem:
@@ -321,17 +322,63 @@ class CryptoHelper:
                     if need:
                         async with buf_lock:
                             await flush()
+                got[raw] = len(rows)
                 return len(rows)
 
-        outcomes = await asyncio.gather(
-            *[one(c) for c in raw_codes], return_exceptions=True
-        )
-        for raw, o in zip(raw_codes, outcomes):
-            if isinstance(o, BaseException):
-                if len(res.errors) < 20:
-                    res.errors.append(f"{dtype} {raw}: {type(o).__name__}: {o}")
-            else:
-                total += o
+        async def run_batch(codes: list[str]) -> None:
+            outcomes = await asyncio.gather(
+                *[one(c) for c in codes], return_exceptions=True
+            )
+            for raw, o in zip(codes, outcomes):
+                if isinstance(o, BaseException):
+                    got[raw] = 0
+                    if len(res.errors) < 20:
+                        res.errors.append(f"{dtype} {raw}: {type(o).__name__}: {o}")
+
+        await run_batch(raw_codes)
+
+        # ---- 补采：第一遍拿到 0 行的合约 ----
+        # 「0 行」有两种含义，处理方式完全不同：
+        #   ① 真的没数据（停牌 / 新上架 / 该窗口内没有结算）
+        #   ② 被限流或瞬时错误吃掉了（交易所常把错误包在 HTTP 200 里 —— okx 50011、
+        #      bybit 10006、htx too-many-requests、mexc 510）
+        # 对 OI 这种快照数据，②远多于①，而漏掉就是永久缺失（多数所没有历史接口，
+        # 实测 mexc 曾每小时静默丢 20% 合约）。所以必须补采：只对空的那些重试，
+        # 最多两轮，代价是每个空合约多 1~2 次请求。
+        if not self.dry_run:
+            for pass_no in (1, 2):
+                missing = [c for c in raw_codes if got.get(c, 0) == 0]
+                if not missing:
+                    break
+                ratio = len(missing) / max(len(raw_codes), 1)
+                if ratio > 0.30:
+                    # 三成以上全空 = 系统性故障（限流风暴 / 熔断），补采只会雪上加霜
+                    res.errors.append(
+                        f"{dtype}: {len(missing)}/{len(raw_codes)} ({ratio:.0%}) 首次全空，"
+                        f"疑似系统性限流或熔断，跳过补采"
+                    )
+                    logger.error(f"[{spec.name}] {dtype} 首次 {ratio:.0%} 全空，跳过补采")
+                    break
+                logger.warning(
+                    f"[{spec.name}] {dtype} 补采第 {pass_no} 轮：{len(missing)} 个合约首轮为空"
+                )
+                await asyncio.sleep(2.0)
+                await run_batch(missing)
+
+            still = [c for c in raw_codes if got.get(c, 0) == 0]
+            if still:
+                ratio = len(still) / max(len(raw_codes), 1)
+                msg = (
+                    f"{dtype}: 补采后仍有 {len(still)}/{len(raw_codes)} ({ratio:.1%}) 个合约无数据"
+                    f"（例：{', '.join(still[:5])}）"
+                )
+                if ratio > 0.02:
+                    res.errors.append(msg)          # >2% → 整个所标 partial
+                    logger.error(f"[{spec.name}] {msg}")
+                else:
+                    logger.warning(f"[{spec.name}] {msg}")
+
+        total = sum(got.values())
         async with buf_lock:
             await flush()
         return total
