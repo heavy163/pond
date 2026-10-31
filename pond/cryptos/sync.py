@@ -61,6 +61,10 @@ class VenueResult:
     errors: list[str] = field(default_factory=list)
     duration_ms: int = 0
     stats: dict[str, int] = field(default_factory=dict)
+    # 补采用的现场：universe 是这一轮的合约清单，done 是「每个 dtype 每个合约拿到几行」。
+    # 有这两样，失败后就能只补缺的，而不是整所重拉。
+    universe: dict[str, list[str]] = field(default_factory=dict)
+    done: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def event(self, ingested_at: datetime | None = None) -> VenueDataEvent:
         return VenueDataEvent(
@@ -178,23 +182,31 @@ class CryptoHelper:
         # OI 是快照：这一小时没写进去，除 gate/bybit 外都永久补不回来。
         # 一次网络抖动就丢一整小时，代价太大，所以对「早失败」的所再试一次。
         # 三个限制防止拖垮下一轮：只重试一次、只重试 10 分钟内失败的、整轮已超 30 分钟就不重试。
-        retry = [
-            s for s in specs
-            if by_name[s.name].status in (TIMEOUT, FAILED)
-            and by_name[s.name].duration_ms < 600_000
-            and (time.monotonic() - t_round) < 1800
-        ]
+        # 补采名单：只要「还有合约没拿到」就补，不管整所是 failed 还是 partial。
+        # 精确补采只请求缺的那几个，很便宜，所以时间闸门放宽到 40 分钟；
+        # 唯一昂贵的是「连 universe 都没拉到」的整所重跑，它仍然卡在 10 分钟内。
+        elapsed = time.monotonic() - t_round
+        retry = []
+        for s in specs:
+            r = by_name[s.name]
+            if not r.universe:
+                if r.status in (TIMEOUT, FAILED) and r.duration_ms < 600_000 and elapsed < 1800:
+                    retry.append(s)
+            elif self._missing_codes(r, s) and elapsed < 2400:
+                retry.append(s)
         if retry and not self.dry_run:
-            logger.warning(f"重试失败的所：{[s.name for s in retry]}")
+            logger.warning(f"补采失败的所：{[s.name for s in retry]}")
             await asyncio.sleep(10)
-            again = await asyncio.gather(
-                *[self._run_venue(s, start, end) for s in retry], return_exceptions=True
-            )
-            for s, g in zip(retry, again):
-                if isinstance(g, BaseException) or g.status == FAILED:
-                    continue                      # 还是失败：保留原始结果
-                logger.warning(f"[{s.name}] 重试成功：{by_name[s.name].status} → {g.status}")
-                by_name[s.name] = g
+            for s in retry:
+                res = by_name[s.name]
+                before = res.status
+                await self._retry_missing(s, start, end, res)
+                self._finalize_status(res, s)
+                logger.warning(
+                    f"[{s.name}] 补采后 {before} → {res.status} rows={res.rows}"
+                )
+                self.notifier.publish_venue(res.event())
+                await asyncio.to_thread(self.store.write_sync_stat, res.stat_row())
 
         results = [by_name[s.name] for s in specs]
         self.notifier.publish_aggregate([r.event() for r in results], self.plan)
@@ -209,6 +221,7 @@ class CryptoHelper:
             async with asyncio.timeout(spec.deadline_sec):
                 async with make_adapter(spec) as ad:
                     uni = await self._universe(ad, spec)
+                    res.universe = uni      # 补采要用：有了它就不必再拉一次 instruments
                     res.codes = len(uni["perp"]) or len(uni["spot"])
                     # 纯现货所（upbit）没有永续是正常的，只有声明了合约类数据才报错
                     if not uni["perp"] and {"kline", "funding", "oi", "mark"} & set(spec.data):
@@ -216,21 +229,21 @@ class CryptoHelper:
                         res.errors.append(f"{spec.name}: 合约 universe 为空")
                     for dtype in spec.data:
                         codes = uni["spot"] if dtype == "spot" else uni["perp"]
-                        res.rows[dtype] = await self._sync_type(
-                            ad, spec, dtype, codes, start, end, res
-                        )
-                    # OI 是快照：这一小时写入的合约数必须≈universe。
-                    # 少一条就是永久少一条（除 gate/bybit 外都没有历史接口），
-                    # 所以宁可把整所标 partial 让人看见，也不能让它悄悄过去。
-                    if "oi" in spec.data and res.codes:
-                        n_oi = res.rows.get("oi", 0)
-                        if n_oi < res.codes * 0.98:
-                            res.status = PARTIAL
-                            res.errors.append(
-                                f"oi: 本轮只写入 {n_oi}/{res.codes} 条（<98%），"
-                                f"快照数据事后无法补齐"
+                        # 单个 dtype 出异常不拖垮整所：已成功的 dtype 保留在 res 里，
+                        # 缺的交给补采按合约补，而不是整所重来。
+                        try:
+                            res.rows[dtype] = await self._sync_type(
+                                ad, spec, dtype, codes, start, end, res
                             )
-                    res.stats = dict(ad.stats)
+                        except (TimeoutError, asyncio.TimeoutError):
+                            raise           # 时间预算用完，整所退出
+                        except Exception as e:
+                            res.errors.append(f"{dtype}: {type(e).__name__}: {e}")
+                            logger.error(
+                                f"[{spec.name}] {dtype} 失败：{type(e).__name__}: {e}"
+                            )
+                    for k, v in ad.stats.items():
+                        res.stats[k] = int(v)
         except (TimeoutError, asyncio.TimeoutError):
             res.status = TIMEOUT
             res.errors.append(f"{spec.name}: 超过 {spec.deadline_sec}s 时间预算")
@@ -241,8 +254,7 @@ class CryptoHelper:
             logger.exception(f"[{spec.name}] 本轮失败")
 
         res.duration_ms = int((time.monotonic() - t0) * 1000)
-        if res.status == SYNCED and res.errors:
-            res.status = PARTIAL
+        self._finalize_status(res, spec)
 
         # 通知先发（下游可立刻开始处理该所），统计后写
         self.notifier.publish_venue(res.event())
@@ -253,6 +265,101 @@ class CryptoHelper:
             f"{res.duration_ms}ms errors={len(res.errors)}"
         )
         return res
+
+    def _finalize_status(self, res: VenueResult, spec: VenueSpec) -> None:
+        """统一判定 status，补采前后各调一次，必须可重复调用（幂等）。
+
+        OI 是快照：这一小时写入的合约数必须≈universe。少一条就是永久少一条
+        （除 gate/bybit 外都没有历史接口），所以宁可标 partial 让人看见，
+        也不能让它悄悄过去。
+        """
+        # 去掉上一轮判定的 oi 结论，避免补采后重复报
+        res.errors = [e for e in res.errors if not e.startswith("数据不新鲜")]
+        for dtype, codes in self._missing_codes(res, spec).items():
+            total = len(res.universe.get("spot" if dtype == "spot" else "perp") or [])
+            ratio = len(codes) / max(total, 1)
+            if ratio > 0.02:      # 零星几个多半真的没成交，>2% 才算异常
+                res.status = PARTIAL if res.status == SYNCED else res.status
+                res.errors.append(
+                    f"数据不新鲜: {dtype} 有 {len(codes)}/{total} ({ratio:.1%}) 个标的"
+                    f"缺本轮应有的最新数据"
+                )
+        if res.status == SYNCED and res.errors:
+            res.status = PARTIAL
+
+    def _missing_codes(self, res: VenueResult, spec: VenueSpec) -> dict[str, list[str]]:
+        """这一轮还差哪些标的（每个 dtype 一份）。没有 universe 时返回空。
+
+        判据是【时间戳】不是行数：拿回一堆旧 K 线也算不合格。
+        """
+        out: dict[str, list[str]] = {}
+        for dtype in spec.data:
+            codes = res.universe.get("spot" if dtype == "spot" else "perp") or []
+            if not codes:
+                continue
+            need = self._expected_ts(dtype, res.window_end)
+            if need <= 0:
+                continue
+            done = res.done.get(dtype, {})
+            miss = [c for c in codes if done.get(c, 0) < need]
+            if miss:
+                out[dtype] = miss
+        return out
+
+    async def _retry_missing(self, spec: VenueSpec, start, end, res: VenueResult) -> None:
+        """按标的精确补采：只重拉这一轮没拿到的合约。
+
+        为什么不用「整所重拉」：整所重拉会把已经成功的合约再请求一遍，白烧配额；
+        而且每次都从第一个合约开始，照样撞上同一波限流 —— 重试次数增加，
+        成功率却不会稳定上升。只补 done 里为 0 的合约，才是一次重试一次机会。
+        """
+        uni = res.universe
+        if not uni:
+            # 连 universe 都没拉到 → 一行都没写进库，整所重跑不会产生重复
+            logger.warning(f"[{spec.name}] 没拿到 universe，整所重跑（无重复风险）")
+            again = await self._run_venue(spec, start, end)
+            if again.status != FAILED:
+                res.status = again.status
+                res.rows = again.rows
+                res.errors = again.errors
+                res.done = again.done
+                res.universe = again.universe
+                res.stats = again.stats
+                res.duration_ms += again.duration_ms
+            return
+
+        try:
+            async with asyncio.timeout(spec.deadline_sec):
+                async with make_adapter(spec) as ad:
+                    for dtype in spec.data:
+                        codes = uni["spot"] if dtype == "spot" else uni["perp"]
+                        if not codes:
+                            continue
+                        need = self._expected_ts(dtype, res.window_end)
+                        if need <= 0:
+                            continue
+                        done = res.done.get(dtype, {})
+                        missing = [c for c in codes if done.get(c, 0) < need]
+                        if not missing:
+                            continue
+                        logger.warning(
+                            f"[{spec.name}] {dtype} 精确补采 {len(missing)}/{len(codes)} 个合约"
+                        )
+                        res.rows[dtype] = res.rows.get(dtype, 0) + await self._sync_type(
+                            ad, spec, dtype, missing, start, end, res
+                        )
+                    for k, v in ad.stats.items():
+                        res.stats[k] = res.stats.get(k, 0) + int(v)
+        except (TimeoutError, asyncio.TimeoutError):
+            res.errors.append(f"{spec.name}: 补采超时（{spec.deadline_sec}s）")
+            return
+        except Exception as e:
+            res.errors.append(f"补采失败: {type(e).__name__}: {e}")
+            return
+
+        # 补采跑完：首轮的失败原因已不成立，清掉后按实际结果重判
+        res.errors = [e for e in res.errors if "补采" not in e]
+        res.status = SYNCED
 
     async def _universe(self, ad, spec: VenueSpec) -> dict[str, list[str]]:
         """按市场返回各自的 raw_code 列表。
@@ -338,7 +445,12 @@ class CryptoHelper:
 
         done = {"n": 0}
         t_start = time.monotonic()
-        got: dict[str, int] = {}       # raw_code -> 这一轮实际拿到的行数
+        # raw_code -> 本轮拿到的【最新时间戳(epoch秒)】，0 表示一行都没拿到。
+        # 用时间戳而不是行数：某个标的有 5 根旧 K 线、缺最新那根，行数>0
+        # 但数据是旧的，只数行数会把它当成功。
+        got: dict[str, int] = {}
+        expect_ts = self._expected_ts(dtype, end)
+        n_rows = {"n": 0}
 
         async def one(raw: str) -> int:
             async with sem:
@@ -357,7 +469,8 @@ class CryptoHelper:
                     if need:
                         async with buf_lock:
                             await flush()
-                got[raw] = len(rows)
+                got[raw] = max((self._row_ts(dtype, r) for r in rows), default=0)
+                n_rows["n"] += len(rows)
                 return len(rows)
 
         async def run_batch(codes: list[str]) -> None:
@@ -382,14 +495,17 @@ class CryptoHelper:
         # 最多两轮，代价是每个空合约多 1~2 次请求。
         if not self.dry_run:
             for pass_no in (1, 2):
-                missing = [c for c in raw_codes if got.get(c, 0) == 0]
+                # 判据是「数据不新鲜」：最新时间戳没到本轮应有的位置。
+                # 空响应、只有旧数据、少最后一根，三种情况都算。
+                missing = [c for c in raw_codes if got.get(c, 0) < expect_ts]
                 if not missing:
                     break
-                ratio = len(missing) / max(len(raw_codes), 1)
+                empty = [c for c in missing if got.get(c, 0) == 0]
+                ratio = len(empty) / max(len(raw_codes), 1)
                 if ratio > 0.30:
                     # 三成以上全空 = 系统性故障（限流风暴 / 熔断），补采只会雪上加霜
                     res.errors.append(
-                        f"{dtype}: {len(missing)}/{len(raw_codes)} ({ratio:.0%}) 首次全空，"
+                        f"{dtype}: {len(empty)}/{len(raw_codes)} ({ratio:.0%}) 首次全空，"
                         f"疑似系统性限流或熔断，跳过补采"
                     )
                     logger.error(f"[{spec.name}] {dtype} 首次 {ratio:.0%} 全空，跳过补采")
@@ -400,11 +516,11 @@ class CryptoHelper:
                 await asyncio.sleep(2.0)
                 await run_batch(missing)
 
-            still = [c for c in raw_codes if got.get(c, 0) == 0]
+            still = [c for c in raw_codes if got.get(c, 0) < expect_ts]
             if still:
                 ratio = len(still) / max(len(raw_codes), 1)
                 msg = (
-                    f"{dtype}: 补采后仍有 {len(still)}/{len(raw_codes)} ({ratio:.1%}) 个合约无数据"
+                    f"{dtype}: 补采后仍有 {len(still)}/{len(raw_codes)} ({ratio:.1%}) 个标的数据不新鲜"
                     f"（例：{', '.join(still[:5])}）"
                 )
                 if ratio > 0.02:
@@ -413,10 +529,37 @@ class CryptoHelper:
                 else:
                     logger.warning(f"[{spec.name}] {msg}")
 
-        total = sum(got.values())
+        total = n_rows["n"]
         async with buf_lock:
             await flush()
+        # 记账：哪个合约拿到几行。所级失败后靠它算「缺哪几个」，只补那几个。
+        res.done.setdefault(dtype, {}).update(got)
         return total
+
+    @staticmethod
+    def _row_ts(dtype: str, row: dict) -> int:
+        """一行数据的时间戳（epoch 秒）。K 线看 open_time，其余看 datetime。"""
+        v = row.get("open_time") if dtype in ("kline", "spot") else row.get("datetime")
+        if v is None:
+            v = row.get("datetime") or row.get("open_time")
+        if isinstance(v, datetime):
+            return int(v.timestamp())
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _expected_ts(dtype: str, end: datetime) -> int:
+        """本轮数据至少要「新到这个时间」。0 = 不按时间校验。
+
+        kline/spot/oi/mark 逐小时对齐：窗口 end 时刻，最后一根收盘 K 线和最新
+        OI 快照都落在 end-1h。funding 按结算周期（1h/4h/8h），没有「每小时
+        必须有一条」的要求，所以不参与新鲜度判定。
+        """
+        if dtype in ("kline", "spot", "oi", "mark"):
+            return int((end - timedelta(hours=1)).timestamp())
+        return 0
 
     @staticmethod
     def _fetcher(ad, dtype: str):
