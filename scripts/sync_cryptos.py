@@ -7,8 +7,8 @@
     # 真写
     python scripts/sync_cryptos.py --execute --symbols BTCUSDT,ETHUSDT,SOLUSDT
 
-    # 全宇宙 + 刷新合约表
-    python scripts/sync_cryptos.py --execute --refresh-instruments
+    # 全宇宙（合约清单每轮自动刷新，无需额外开关）
+    python scripts/sync_cryptos.py --execute
 
 退出码：全部 success → 0；有 failed/timeout → 1（systemd 据此告警）。
 """
@@ -40,7 +40,8 @@ def parse_args():
     p.add_argument("--symbols", help="逗号分隔 raw symbol，覆盖配置的 include")
     p.add_argument("--data", help="逗号分隔数据类型 kline,spot,funding,oi,mark")
     p.add_argument("--config", default=None, help="YAML 路径")
-    p.add_argument("--refresh-instruments", action="store_true")
+    p.add_argument("--lock-wait", type=int, default=0,
+                   help="抢不到同步锁时最多等多少秒（默认 0=直接跳过本轮）")
     p.add_argument("--mqtt", default="auto", choices=["auto", "mqtt", "log", "off"])
     p.add_argument("--execute", action="store_true", help="真正写库（默认 dry-run 只拉不写）")
     p.add_argument("--json", action="store_true", help="末尾打印 JSON 便于脚本消费")
@@ -77,7 +78,7 @@ def main() -> int:
     logger.remove()
     logger.add(sys.stderr, level="INFO")
 
-    lock = _acquire_lock(wait_sec=900 if args.refresh_instruments else 0)
+    lock = _acquire_lock(wait_sec=args.lock_wait)
     if lock is None:
         logger.warning("另一轮同步正在运行（~/.local/state/cryptos/sync.lock 被占用），本轮跳过")
         return 0
@@ -107,7 +108,7 @@ def main() -> int:
 
     results = asyncio.run(
         helper.run_round(
-            venues=args.venue, refresh_instruments=args.refresh_instruments
+            venues=args.venue
         )
     )
 

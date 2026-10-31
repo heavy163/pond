@@ -134,6 +134,12 @@ def main() -> int:
         for g in lost[:8]:
             print(f"  {g.venue}/{g.data_type}/{g.code} {g.day}: {g.reason}")
 
+    if rc == 2:
+        print("\n⚠️ 有修复窗口失败：上面 `!` 开头的行仍然缺失，需要重跑或人工确认"
+              "（unit 里 SuccessExitStatus=2，所以 systemd 不会标红）。")
+    rc_str = {0: "0（无异常）", 1: "1（--strict 且有永久丢失）", 2: "2（有窗口修复失败）"}[rc]
+    print(f"exit={rc_str}")
+
     if args.json:
         print(json.dumps([g.__dict__ | {"day": str(g.day)} for g in gaps], ensure_ascii=False))
 

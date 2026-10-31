@@ -66,10 +66,8 @@ async def run_once(args) -> int:
     helper, store = build_helper(args)
     t0 = time.monotonic()
     try:
-        results = await helper.run_round(
-            venues=getattr(args, "venues", None),
-            refresh_instruments=getattr(args, "refresh_instruments", False),
-        )
+        # 合约清单每轮自动实时刷新（sync._universe 里调 instruments()），无需开关
+        results = await helper.run_round(venues=getattr(args, "venues", None))
     finally:
         helper.close()
 
@@ -157,7 +155,6 @@ def main() -> int:
 
     p = sub.add_parser("once")
     p.add_argument("--venues", nargs="*")
-    p.add_argument("--refresh-instruments", action="store_true")
     p.add_argument("--retain-days", type=int, default=365)
     p.set_defaults(func=cmd_once, retain_days=365)
 
@@ -166,7 +163,6 @@ def main() -> int:
     p.add_argument("--max-size-gb", type=float, default=None)
     p.add_argument("--run-now", action="store_true", help="启动时立刻跑一轮（默认等到下一个 :05）")
     p.add_argument("--venues", nargs="*", help="只跑指定交易所（缺省=配置里全部）")
-    p.add_argument("--refresh-instruments", action="store_true")
     p.set_defaults(func=cmd_loop)
 
     p = sub.add_parser("prune")

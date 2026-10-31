@@ -146,7 +146,6 @@ class CryptoHelper:
         self,
         now: datetime | None = None,
         venues: list[str] | None = None,
-        refresh_instruments: bool = False,
     ) -> list[VenueResult]:
         cfg = self.reload_config()
         start, end = self.window(now)
@@ -158,7 +157,7 @@ class CryptoHelper:
 
         tasks = {
             s.name: asyncio.create_task(
-                self._run_venue(s, start, end, refresh_instruments), name=f"venue:{s.name}"
+                self._run_venue(s, start, end), name=f"venue:{s.name}"
             )
             for s in specs
         }
@@ -178,14 +177,14 @@ class CryptoHelper:
         return results
 
     async def _run_venue(
-        self, spec: VenueSpec, start: datetime, end: datetime, refresh: bool
+        self, spec: VenueSpec, start: datetime, end: datetime
     ) -> VenueResult:
         t0 = time.monotonic()
         res = VenueResult(spec.name, start, end)
         try:
             async with asyncio.timeout(spec.deadline_sec):
                 async with make_adapter(spec) as ad:
-                    uni = await self._universe(ad, spec, refresh)
+                    uni = await self._universe(ad, spec)
                     res.codes = len(uni["perp"]) or len(uni["spot"])
                     # 纯现货所（upbit）没有永续是正常的，只有声明了合约类数据才报错
                     if not uni["perp"] and {"kline", "funding", "oi", "mark"} & set(spec.data):
@@ -220,11 +219,15 @@ class CryptoHelper:
         )
         return res
 
-    async def _universe(self, ad, spec: VenueSpec, refresh: bool) -> dict[str, list[str]]:
+    async def _universe(self, ad, spec: VenueSpec) -> dict[str, list[str]]:
         """按市场返回各自的 raw_code 列表。
 
         现货与合约是两套 symbol（bybit 同名、kucoin/htx 不同名），
         混用会漏采（现货对里有很多没有合约的币）。
+
+        注意：instruments() 是【每轮实时调用】，没有缓存，也不看什么 refresh 开关。
+        新上架的合约下一轮自动进 universe，下架的自动退出。别再引入 instrument 缓存——
+        缓存过就会漏掉新币，且不会报错，只是静静地少采。
         """
         inst = await ad.instruments()
         # 有些所（upbit）instruments() 本身就返回现货市场（contract_type='spot'），
