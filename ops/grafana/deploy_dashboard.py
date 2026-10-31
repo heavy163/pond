@@ -78,13 +78,18 @@ def panel(pid: int, title: str, sql: str, x: int, y: int, w: int, h: int,
 PANELS = [
     panel(
         1, "① 同步状态（最近一轮）",
-        """SELECT venue, status, rows, codes, duration_ms,
-                  formatDateTime(checked_at, '%H:%i:%S') AS checked
-           FROM cryptos.sync_stat
-           WHERE window_end = (SELECT max(window_end) FROM cryptos.sync_stat)
-           ORDER BY venue""",
+        """SELECT * FROM (
+               SELECT venue, status, rows, codes, duration_ms,
+                      formatDateTime(checked_at, '%m-%d %H:%i:%S') AS checked,
+                      formatDateTime(window_end, '%H:%i') AS round_h
+               FROM cryptos.sync_stat
+               ORDER BY checked_at DESC
+               LIMIT 1 BY venue
+           ) ORDER BY venue""",
         0, 0, 12, 8,
-        desc="status 不是 synced 就该告警。注意：synced 只代表请求没报错，不代表数据正确。",
+        desc=("每个交易所取它自己最近一次上报，恒为 9 行——轮次没跑完也不会消失。"
+              "看 round_h 是否一致：某家 round_h 落后就说明它没跟上这一轮。"
+              "status 不是 synced 就该看 journal。注意：synced 只代表请求没报错，不代表数据正确。"),
     ),
     panel(
         2, "② 数据新鲜度（滞后小时）",

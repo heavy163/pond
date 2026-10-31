@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,10 +47,40 @@ def parse_args():
     return p.parse_args()
 
 
+def _acquire_lock(wait_sec: float = 0.0):
+    """同一个库只允许一轮同步在跑。
+
+    2026-11-01 事故：00:02 整轮同步和 00:05 合约刷新同时跑，两轮抢同一批
+    交易所限速 → 7/8 所 status=partial，且同一个 window_end 写了两份。
+    这里用 flock 串行化：普通轮次抢不到就跳过（下一小时再来），
+    合约刷新最多等 15 分钟。
+    """
+    d = Path.home() / ".local/state/cryptos"
+    d.mkdir(parents=True, exist_ok=True)
+    fh = open(d / "sync.lock", "a+")   # a+ 不截断别人持有的文件
+    deadline = time.monotonic() + wait_sec
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+            return fh
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                return None
+            time.sleep(5)
+
+
 def main() -> int:
     args = parse_args()
     logger.remove()
     logger.add(sys.stderr, level="INFO")
+
+    lock = _acquire_lock(wait_sec=900 if args.refresh_instruments else 0)
+    if lock is None:
+        logger.warning("另一轮同步正在运行（~/.local/state/cryptos/sync.lock 被占用），本轮跳过")
+        return 0
 
     store = CryptoStore.from_env()
     overrides: dict = {}
