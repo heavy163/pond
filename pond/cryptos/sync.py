@@ -163,7 +163,8 @@ class CryptoHelper:
         }
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        results: list[VenueResult] = []
+        t_round = time.monotonic()
+        by_name: dict[str, VenueResult] = {}
         for (name, _), g in zip(tasks.items(), gathered):
             if isinstance(g, BaseException):
                 res = VenueResult(name, start, end, status=FAILED, errors=[repr(g)])
@@ -171,8 +172,31 @@ class CryptoHelper:
                 self.notifier.publish_venue(res.event())
             else:
                 res = g
-            results.append(res)
+            by_name[name] = res
 
+        # ---- 失败的所原地重试一次 ----
+        # OI 是快照：这一小时没写进去，除 gate/bybit 外都永久补不回来。
+        # 一次网络抖动就丢一整小时，代价太大，所以对「早失败」的所再试一次。
+        # 三个限制防止拖垮下一轮：只重试一次、只重试 10 分钟内失败的、整轮已超 30 分钟就不重试。
+        retry = [
+            s for s in specs
+            if by_name[s.name].status in (TIMEOUT, FAILED)
+            and by_name[s.name].duration_ms < 600_000
+            and (time.monotonic() - t_round) < 1800
+        ]
+        if retry and not self.dry_run:
+            logger.warning(f"重试失败的所：{[s.name for s in retry]}")
+            await asyncio.sleep(10)
+            again = await asyncio.gather(
+                *[self._run_venue(s, start, end) for s in retry], return_exceptions=True
+            )
+            for s, g in zip(retry, again):
+                if isinstance(g, BaseException) or g.status == FAILED:
+                    continue                      # 还是失败：保留原始结果
+                logger.warning(f"[{s.name}] 重试成功：{by_name[s.name].status} → {g.status}")
+                by_name[s.name] = g
+
+        results = [by_name[s.name] for s in specs]
         self.notifier.publish_aggregate([r.event() for r in results], self.plan)
         return results
 
@@ -195,6 +219,17 @@ class CryptoHelper:
                         res.rows[dtype] = await self._sync_type(
                             ad, spec, dtype, codes, start, end, res
                         )
+                    # OI 是快照：这一小时写入的合约数必须≈universe。
+                    # 少一条就是永久少一条（除 gate/bybit 外都没有历史接口），
+                    # 所以宁可把整所标 partial 让人看见，也不能让它悄悄过去。
+                    if "oi" in spec.data and res.codes:
+                        n_oi = res.rows.get("oi", 0)
+                        if n_oi < res.codes * 0.98:
+                            res.status = PARTIAL
+                            res.errors.append(
+                                f"oi: 本轮只写入 {n_oi}/{res.codes} 条（<98%），"
+                                f"快照数据事后无法补齐"
+                            )
                     res.stats = dict(ad.stats)
         except (TimeoutError, asyncio.TimeoutError):
             res.status = TIMEOUT
