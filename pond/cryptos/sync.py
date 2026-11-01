@@ -65,6 +65,7 @@ class VenueResult:
     # 有这两样，失败后就能只补缺的，而不是整所重拉。
     universe: dict[str, list[str]] = field(default_factory=dict)
     done: dict[str, dict[str, int]] = field(default_factory=dict)
+    attempts: dict[str, int] = field(default_factory=dict)   # dtype -> 已补采轮数
 
     def event(self, ingested_at: datetime | None = None) -> VenueDataEvent:
         return VenueDataEvent(
@@ -97,6 +98,11 @@ class VenueResult:
 
 
 class CryptoHelper:
+    # 补采容错规则：前 FREE_PASS 轮容错 0（一个不许少），之后每多补 1 轮容错 +1。
+    # 真正的成本闸门是「请求预算 = 一整轮的量」（在 _sync_type 里按标的数算），
+    # MAX_PASS 只是防死循环的保险丝。
+    FREE_PASS = 3
+    MAX_PASS = 20
     def __init__(
         self,
         store: CryptoStore,
@@ -192,7 +198,7 @@ class CryptoHelper:
             if not r.universe:
                 if r.status in (TIMEOUT, FAILED) and r.duration_ms < 600_000 and elapsed < 1800:
                     retry.append(s)
-            elif self._missing_codes(r, s) and elapsed < 2400:
+            elif self._needs_refill(r, s) and elapsed < 2400:
                 retry.append(s)
         if retry and not self.dry_run:
             logger.warning(f"补采失败的所：{[s.name for s in retry]}")
@@ -276,13 +282,13 @@ class CryptoHelper:
         # 去掉上一轮判定的 oi 结论，避免补采后重复报
         res.errors = [e for e in res.errors if not e.startswith("数据不新鲜")]
         for dtype, codes in self._missing_codes(res, spec).items():
-            total = len(res.universe.get("spot" if dtype == "spot" else "perp") or [])
-            ratio = len(codes) / max(total, 1)
-            if ratio > 0.02:      # 零星几个多半真的没成交，>2% 才算异常
+            n_pass = res.attempts.get(dtype, 0)
+            tol = max(0, n_pass - self.FREE_PASS)
+            if len(codes) > tol:
                 res.status = PARTIAL if res.status == SYNCED else res.status
                 res.errors.append(
-                    f"数据不新鲜: {dtype} 有 {len(codes)}/{total} ({ratio:.1%}) 个标的"
-                    f"缺本轮应有的最新数据"
+                    f"数据不新鲜: {dtype} 补采 {n_pass} 轮后仍缺 {len(codes)} 个标的的"
+                    f"最新数据（容错 {tol}）"
                 )
         if res.status == SYNCED and res.errors:
             res.status = PARTIAL
@@ -305,6 +311,14 @@ class CryptoHelper:
             if miss:
                 out[dtype] = miss
         return out
+
+    def _needs_refill(self, res: VenueResult, spec: VenueSpec) -> bool:
+        """还值不值得再补一轮 —— 超出容错阶梯才补，容错之内的不再打扰交易所。"""
+        for dtype, codes in self._missing_codes(res, spec).items():
+            tol = max(0, res.attempts.get(dtype, 0) - self.FREE_PASS)
+            if len(codes) > tol:
+                return True
+        return False
 
     async def _retry_missing(self, spec: VenueSpec, start, end, res: VenueResult) -> None:
         """按标的精确补采：只重拉这一轮没拿到的合约。
@@ -486,49 +500,62 @@ class CryptoHelper:
 
         await run_batch(raw_codes)
 
-        # ---- 补采：第一遍拿到 0 行的合约 ----
-        # 「0 行」有两种含义，处理方式完全不同：
-        #   ① 真的没数据（停牌 / 新上架 / 该窗口内没有结算）
-        #   ② 被限流或瞬时错误吃掉了（交易所常把错误包在 HTTP 200 里 —— okx 50011、
-        #      bybit 10006、htx too-many-requests、mexc 510）
-        # 对 OI 这种快照数据，②远多于①，而漏掉就是永久缺失（多数所没有历史接口，
-        # 实测 mexc 曾每小时静默丢 20% 合约）。所以必须补采：只对空的那些重试，
-        # 最多两轮，代价是每个空合约多 1~2 次请求。
+        # ---- 补采：只补「数据不新鲜」的标的 ----
+        # 判据是时间戳，不是行数：有旧 K 线、缺最新那根也算不合格。
+        # 容错按轮次递增，不用百分比 —— 百分比等于默认「丢 2% 不算丢」，
+        # 1,070 个合约允许丢 21 个，正是要命的漏法。
+        #   前 3 轮容错 0（必须一个不少）
+        #   之后每多补 1 轮，容错 +1（给「真的没成交」的标的留出口）
+        # 请求预算 = 一整轮的量，防止限流风暴时对着空响应反复打。
         if not self.dry_run:
-            for pass_no in (1, 2):
-                # 判据是「数据不新鲜」：最新时间戳没到本轮应有的位置。
-                # 空响应、只有旧数据、少最后一根，三种情况都算。
+            n_pass = 0
+            spent = 0
+            # 预算下限 200：小所（比如 20 个标的）也要能爬完容错阶梯，
+            # 8 个不新鲜需要 11 轮 × 8 = 88 次请求。
+            budget = max(len(raw_codes), 200)
+            while True:
                 missing = [c for c in raw_codes if got.get(c, 0) < expect_ts]
-                if not missing:
+                tol = max(0, n_pass - self.FREE_PASS)
+                if len(missing) <= tol:
                     break
-                empty = [c for c in missing if got.get(c, 0) == 0]
-                ratio = len(empty) / max(len(raw_codes), 1)
-                if ratio > 0.30:
-                    # 三成以上全空 = 系统性故障（限流风暴 / 熔断），补采只会雪上加霜
+                if n_pass >= self.MAX_PASS:
+                    break
+                if n_pass == 0 and all(got.get(c, 0) == 0 for c in raw_codes):
                     res.errors.append(
-                        f"{dtype}: {len(empty)}/{len(raw_codes)} ({ratio:.0%}) 首次全空，"
-                        f"疑似系统性限流或熔断，跳过补采"
+                        f"{dtype}: {len(raw_codes)} 个标的本轮全部无数据，疑似系统性故障，不补采"
                     )
-                    logger.error(f"[{spec.name}] {dtype} 首次 {ratio:.0%} 全空，跳过补采")
+                    logger.error(
+                        f"[{spec.name}] {dtype} 全部 {len(raw_codes)} 个标的无数据，不补采"
+                    )
                     break
+                if spent + len(missing) > budget:
+                    logger.warning(
+                        f"[{spec.name}] {dtype} 补采预算用尽（已发 {spent} 次请求），停止补采"
+                    )
+                    break
+                spent += len(missing)
+                n_pass += 1
                 logger.warning(
-                    f"[{spec.name}] {dtype} 补采第 {pass_no} 轮：{len(missing)} 个合约首轮为空"
+                    f"[{spec.name}] {dtype} 第 {n_pass} 轮补采：{len(missing)} 个标的不新鲜"
+                    f"（本轮容错 {tol}）"
                 )
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(min(float(n_pass), 5.0))
                 await run_batch(missing)
 
             still = [c for c in raw_codes if got.get(c, 0) < expect_ts]
-            if still:
-                ratio = len(still) / max(len(raw_codes), 1)
+            tol = max(0, n_pass - self.FREE_PASS)
+            if len(still) > tol:
                 msg = (
-                    f"{dtype}: 补采后仍有 {len(still)}/{len(raw_codes)} ({ratio:.1%}) 个标的数据不新鲜"
-                    f"（例：{', '.join(still[:5])}）"
+                    f"{dtype}: 补采 {n_pass} 轮后仍有 {len(still)} 个标的数据不新鲜"
+                    f"（容错 {tol}，例：{', '.join(still[:5])}）"
                 )
-                if ratio > 0.02:
-                    res.errors.append(msg)          # >2% → 整个所标 partial
-                    logger.error(f"[{spec.name}] {msg}")
-                else:
-                    logger.warning(f"[{spec.name}] {msg}")
+                res.errors.append(msg)
+                logger.error(f"[{spec.name}] {msg}")
+            elif still:
+                logger.warning(
+                    f"[{spec.name}] {dtype} 仍有 {len(still)} 个标的不新鲜，在容错 {tol} 之内"
+                )
+        res.attempts[dtype] = res.attempts.get(dtype, 0) + n_pass
 
         total = n_rows["n"]
         async with buf_lock:
