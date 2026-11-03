@@ -255,7 +255,8 @@ class BybitAdapter(VenueAdapter):
                     "intervalTime": "1h",
                     "startTime": start_ms,
                     "endTime": cursor_end - 1,
-                    "limit": 200,
+                    # 原 200 根 = 200 小时历史，6 小时窗口只用 6 根，单合约 227 KB
+                    "limit": self.page_limit(start, end, per_page=200),
                 },
                 endpoint="oi",
                 cost=1,

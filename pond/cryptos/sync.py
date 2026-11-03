@@ -49,6 +49,16 @@ DATA_TABLE = {
     "fx": TABLE_FX,
 }
 
+# 每轮需要补的【最小步长】：kline/spot 是 1 小时一根；oi 是快照、每小时一条；
+# funding 是事件流（结算间隔 1~8h 不定），用 1 秒表示「从最后一条之后继续找」。
+STEP = {
+    "kline": timedelta(hours=1),
+    "spot": timedelta(hours=1),
+    "oi": timedelta(hours=1),
+    "mark": timedelta(hours=1),
+    "funding": timedelta(seconds=1),
+}
+
 
 @dataclass
 class VenueResult:
@@ -445,6 +455,32 @@ class CryptoHelper:
         sem = asyncio.Semaphore(spec.concurrency)
         total = 0
 
+        # ── 按合约精确增量 ──────────────────────────────────────────────
+        # 原来的做法：不管库里有没有，每个合约都按 [end-6h, end) 整窗拉 6 根，
+        # 拉回来再靠新鲜度判据挑出缺的。流量因此和「新鲜度」无关。
+        # 现在先取每个 code 的 max(时间)，已经新鲜到本轮末的一个请求都不发，
+        # 落后的只补 [latest+step, end)。窗口下界仍是 start（= end - lookback），
+        # 所以长缺口不会被这里变成无界回补 —— 那是 gapcheck 的职责。
+        last: dict[str, int] = {}          # 规范 code -> 最新 epoch 秒
+        fund: dict[str, tuple[int, int]] = {}   # funding 专用：code -> (最新结算, interval_sec)
+        step = STEP.get(dtype)
+        if step is not None and not self.dry_run:
+            try:
+                if dtype == "funding":
+                    # 回看 72h 而不是 start：8h 结算的合约上一次结算常常在 6h 窗口之外，
+                    # 只看 6h 会让它们全部落到「没有记录 → 按整窗拉」的兜底分支。
+                    fund = await asyncio.to_thread(
+                        self.store.funding_state,
+                        spec.name,
+                        start - timedelta(hours=72),
+                    )
+                else:
+                    last = await asyncio.to_thread(
+                        self.store.latest_by_code, table, spec.name, start
+                    )
+            except Exception as e:                                   # noqa: BLE001
+                logger.warning(f"[{spec.name}] {dtype} 取最新时间戳失败，退回整窗: {e}")
+
         # 每个币单独 INSERT 会在全量下变成几千次 HTTP 往返，ClickHouse 侧
         # 还会爆 part；改成攒够 500 行写一次（原来 3,519 次 → 约 40 次）。
         buf: list[dict] = []
@@ -469,7 +505,32 @@ class CryptoHelper:
 
         async def one(raw: str) -> int:
             async with sem:
-                rows = clip_window(table, await fn(raw, start, end), start, end)
+                lo = start
+                # funding：还没到下次结算就整轮跳过（8h 结算的合约每小时问一遍有 7/8 是空）
+                if dtype == "funding":
+                    st = fund.get(ad.resolve_code(raw))
+                    if st:
+                        lt_f, iv = st
+                        if int(end.timestamp()) < lt_f + max(iv, 3600) - 60:
+                            done["n"] += 1
+                            got[raw] = lt_f
+                            return 0
+                        if lt_f + 1 > int(start.timestamp()):
+                            lo = datetime.fromtimestamp(lt_f + 1, tz=timezone.utc)
+                        if lo >= end:
+                            done["n"] += 1
+                            got[raw] = lt_f
+                            return 0
+                lt = last.get(ad.resolve_code(raw))
+                if lt and step is not None:
+                    # 用 epoch 比较：库里读回的时间戳不带时区，直接和 UTC 的 end 比会差 8 小时
+                    lo_s = max(int(start.timestamp()), lt + int(step.total_seconds()))
+                    if lo_s >= int(end.timestamp()):   # 已经新鲜到窗口末尾 → 零请求
+                        done["n"] += 1
+                        got[raw] = lt
+                        return 0
+                    lo = datetime.fromtimestamp(lo_s, tz=timezone.utc)
+                rows = clip_window(table, await fn(raw, lo, end), lo, end)
                 done["n"] += 1
                 if done["n"] % 50 == 0:
                     el = time.monotonic() - t_start
@@ -584,6 +645,9 @@ class CryptoHelper:
         kline/spot/oi/mark 逐小时对齐：窗口 end 时刻，最后一根收盘 K 线和最新
         OI 快照都落在 end-1h。funding 按结算周期（1h/4h/8h），没有「每小时
         必须有一条」的要求，所以不参与新鲜度判定。
+
+        注意：返回 0 会让 funding 同时【不进入 _missing_codes】→ 不补采、不重试。
+        这是刻意的：资金费率拉不到就等下一次结算窗口，丢了就丢了，不为它重试。
         """
         if dtype in ("kline", "spot", "oi", "mark"):
             return int((end - timedelta(hours=1)).timestamp())

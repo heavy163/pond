@@ -31,6 +31,15 @@ class UpbitAdapter(VenueAdapter):
     BASE = "https://api.upbit.com"
     PAGE = 200          # 单页上限
 
+    def resolve_code(self, raw_code: str) -> str:
+        """Upbit 原生是 KRW-BTC，库里存的是统一的 BASE-QUOTE（BTC-KRW）。
+
+        不覆写这个方法，按合约精确增量时查库永远匹配不上 code，每个合约
+        都会退回整窗拉取（实测每轮多拉 1,800 行 / 2.8 MB）。
+        """
+        parts = raw_code.split("-", 1)
+        return f"{parts[1]}-{parts[0]}" if len(parts) == 2 else raw_code
+
     # ---------------- 合约/市场清单 ----------------
 
     async def instruments(self) -> list[dict[str, Any]]:

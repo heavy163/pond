@@ -107,6 +107,14 @@ class VenueAdapter(ABC):
                 continue
 
             code = resp.status_code
+            # 流量记账：每轮同步实际下载多少字节。上游只看行数会漏掉
+            # 「拉 300 根只用 6 根」这种放大（OKX 曾经每轮每合约下载 300 根）。
+            # 用真实网线字节（num_bytes_downloaded），不是解压后的长度：
+            # htx 走 gzip，content 比实际传输大 2.3 倍，按 content 记会虚报。
+            nbytes = getattr(resp, "num_bytes_downloaded", None) or len(resp.content)
+            self.stats["bytes"] += nbytes
+            self.stats[f"bytes_{endpoint}"] += nbytes
+            self.stats[f"resp_{endpoint}"] += 1
             self._observe_quota(endpoint, resp)
 
             if code == 200:
@@ -252,6 +260,24 @@ class VenueAdapter(ABC):
         return []
 
     # ---------------- 工具 ----------------
+
+    @staticmethod
+    def page_limit(
+        start: datetime, end: datetime, *, per_page: int, hours_per_bar: int = 1, pad: int = 2
+    ) -> int:
+        """按窗口算这一页到底需要多少根，而不是把接口最大页拉满。
+
+        2026-11-03 流量事故：每轮窗口只有 6 小时（6 根 1h bar），但 gate OI 传
+        limit=1000、bybit OI 传 200、htx kline 传 size=2000、okx kline 传 300，
+        拉回来再在本地 `if ts < start or ts >= end: continue` 丢掉 99%。
+        实测每轮下载 1.09 GB，其中 96% 是 gate/htx/bybit 这三处浪费的。
+
+        pad=2 是给「窗口边界那根未闭合 bar」和时区/取整误差留的余量。
+        回补大窗口时 need 会超过 per_page，被 min() 压回接口上限，翻页逻辑照常工作。
+        """
+        span = int((end - start).total_seconds() // 60 // 60)
+        need = span // max(1, hours_per_bar) + pad
+        return max(1, min(per_page, need))
 
     def resolve_code(self, raw_code: str) -> str:
         """raw symbol → 规范 code。子类可覆盖。"""

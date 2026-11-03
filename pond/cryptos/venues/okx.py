@@ -119,9 +119,12 @@ class OkxAdapter(VenueAdapter):
         now = datetime.now(timezone.utc)
         while cursor_end > start_ms:
             path = "/api/v5/market/candles" if not out else "/api/v5/market/history-candles"
+            # OKX 这根接口没有 start/end，只能靠 after+limit 表达窗口。原来硬写 300：
+            # 6 小时窗口也拉 300 根（29 KB/合约），本轮 522 个合约 = 15 MB/轮。
+            want = max(1, min(300, (cursor_end - start_ms) // HOUR_MS + 2))
             d = await self.request(
                 f"{self.BASE}{path}",
-                {"instId": inst, "bar": "1H", "limit": 300, "after": cursor_end - 1},
+                {"instId": inst, "bar": "1H", "limit": want, "after": cursor_end - 1},
                 endpoint="kline",
                 cost=1,
             )
@@ -156,7 +159,7 @@ class OkxAdapter(VenueAdapter):
             if oldest <= start_ms or oldest >= cursor_end:
                 break
             cursor_end = oldest
-            if len(rows) < 100:      # 已到上市起点
+            if len(rows) < want:     # 返回不足请求量 = 已到上市起点
                 break
         return out
 
@@ -172,7 +175,11 @@ class OkxAdapter(VenueAdapter):
         while cursor > start_ms:
             d = await self.request(
                 f"{self.BASE}/api/v5/public/funding-rate-history",
-                {"instId": raw, "limit": 100, "after": cursor - 1},
+                # 资金费率结算间隔通常 8h（部分 1~4h）。6 小时窗口要 1~2 条，
+                # 原来固定 100 条 = 33 天历史，单合约 18 KB。
+                {"instId": raw,
+                 "limit": max(3, min(100, int((cursor - start_ms) / 3_600_000) + 2)),
+                 "after": cursor - 1},
                 endpoint="funding",
                 cost=1,
             )

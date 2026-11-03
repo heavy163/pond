@@ -186,6 +186,8 @@ class BitgetAdapter(VenueAdapter):
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
         raw_rows: list[dict[str, Any]] = []
+        # 按窗口定页大小（6 小时窗口 8 条足够，原来固定 100）
+        page_size = self.page_limit(start, end, per_page=100)
         page = 1
         while page <= 20:
             d = await self.request(
@@ -193,7 +195,7 @@ class BitgetAdapter(VenueAdapter):
                 {
                     "symbol": raw_code,
                     "productType": PRODUCT,
-                    "pageSize": 100,
+                    "pageSize": page_size,
                     "pageNo": page,
                 },
                 endpoint="funding",
@@ -209,7 +211,7 @@ class BitgetAdapter(VenueAdapter):
                     raw_rows.append(r)
                 if t < start_ms:
                     hit_old = True
-            if hit_old or len(rows) < 100:
+            if hit_old or len(rows) < page_size:
                 break
             page += 1
         if not raw_rows:

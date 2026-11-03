@@ -119,7 +119,8 @@ class HtxAdapter(VenueAdapter):
                 {
                     "contract_code": raw_code,
                     "period": "60min",
-                    "size": 2000,
+                    # 原 size=2000：6 小时窗口也拉 2000 根，单合约 287 KB
+                    "size": self.page_limit(start, end, per_page=2000),
                     "from": start_s,
                     "to": cursor_end - 1,
                 },
@@ -166,9 +167,12 @@ class HtxAdapter(VenueAdapter):
         """
         code = self.resolve_code(raw_code)
         symbol = raw_code.replace("-", "").lower()
+        # 现货接口没有 from/to，只会返回「最近 size 根」。所以 size 必须覆盖
+        # 从窗口起点到现在，而不是无脑 2000（6 小时窗口单合约下载 248 KB）。
+        span_h = int((datetime.now(timezone.utc) - start).total_seconds() // 3600) + 2
         d = await self.request(
             "https://api.huobi.pro/market/history/kline",
-            {"symbol": symbol, "period": "60min", "size": 2000},
+            {"symbol": symbol, "period": "60min", "size": max(1, min(2000, span_h))},
             endpoint="kline", cost=1,
         )
         rows = d.get("data") or []
@@ -202,7 +206,9 @@ class HtxAdapter(VenueAdapter):
         while page <= 20:
             d = await self.request(
                 f"{self.BASE}/linear-swap-api/v1/swap_historical_funding_rate",
-                {"contract_code": raw_code, "page_index": page, "page_size": 100},
+                # 6 小时窗口只需 1~2 条结算记录，原来固定 page_size=100（≈33 天，24.5 KB/合约）
+                {"contract_code": raw_code, "page_index": page,
+                 "page_size": self.page_limit(start, end, per_page=100)},
                 endpoint="funding",
                 cost=1,
             )

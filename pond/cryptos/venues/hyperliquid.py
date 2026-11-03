@@ -26,6 +26,7 @@ HOUR_MS = 3600 * 1000
 
 class HyperliquidAdapter(VenueAdapter):
     name = "hyperliquid"
+    _ctxs = None      # metaAndAssetCtxs 的轮内缓存：(universe, ctxs)
     BASE = "https://api.hyperliquid.xyz"
 
     async def instruments(self) -> list[dict[str, Any]]:
@@ -141,12 +142,17 @@ class HyperliquidAdapter(VenueAdapter):
     async def open_interest(
         self, raw_code: str, start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
-        d = await self.request(f"{self.BASE}/info", method="POST",
-                           json_body={"type": "metaAndAssetCtxs"}, endpoint="oi", cost=2)
-        if not isinstance(d, list) or len(d) < 2:
-            return []
-        universe = (d[0] or {}).get("universe") or []
-        ctxs = d[1] or []
+        # metaAndAssetCtxs 一次就返回【全部 179 个币】的上下文（~70 KB）。
+        # 原来每个合约都请求一遍 = 同一份数据拉 179 次，每轮 12.6 MB，
+        # 占全所流量的 23%。适配器实例是每轮 sync 新建的，所以直接缓存在实例上
+        # 就等价于「每轮一次」，不需要 TTL。
+        if self._ctxs is None:
+            d = await self.request(f"{self.BASE}/info", method="POST",
+                               json_body={"type": "metaAndAssetCtxs"}, endpoint="oi", cost=2)
+            if not isinstance(d, list) or len(d) < 2:
+                return []
+            self._ctxs = ((d[0] or {}).get("universe") or [], d[1] or [])
+        universe, ctxs = self._ctxs
         idx = next((i for i, u in enumerate(universe) if u.get("name") == raw_code), None)
         if idx is None or idx >= len(ctxs):
             return []

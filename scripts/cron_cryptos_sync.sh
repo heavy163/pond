@@ -23,8 +23,17 @@ ts_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 /usr/bin/python3.12 scripts/sync_cryptos.py --execute "$@" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 
-# 同步后再查一次缺口（只修复不写台账）：停机后 1 小时内补回，而不是等次日 00:20
-if [ "$rc" -eq 0 ]; then
+# 同步后是否要立刻查缺口：只在出错时才查，见下面注释
+GAP_SUMMARY="$(tail -n 60 "$LOG" | grep -cE '\b(partial|failed)\b' || true)"
+if [ "$rc" -eq 0 ] && [ "${GAP_SUMMARY:-0}" -eq 0 ]; then
+    # 常规轮次没事就不查缺口了。
+    #   1) 同步已改成「按合约精确增量」：每轮拿各合约库里的 max(时间) 续拉，
+    #      6 小时内的空档会在下一轮自动补上，不需要再扫一遍；
+    #   2) 每小时跑一次 check_gaps --days 2 是重复劳动，纯浪费请求和流量；
+    #   3) 长空档（>6h，如停机过夜）交给每天 00:20 的 cryptos-gapcheck.timer。
+    # 只有本轮出现 partial/failed 才立刻补一次，保住「出问题当场修」这条底线。
+    echo "[gapcheck] 本轮无 partial/failed，跳过小时级补采" >> "$LOG"
+else
     /usr/bin/python3.12 scripts/check_gaps.py --days 2 --execute --no-coverage 2>&1 | tee -a "$LOG"
     gap_rc=${PIPESTATUS[0]}
     [ "$gap_rc" -ne 0 ] && echo "[gapcheck] exit=${gap_rc}" >> "$LOG"

@@ -189,6 +189,48 @@ class CryptoStore:
             return None
         return v
 
+    def latest_by_code(self, table: str, venue: str, since: datetime) -> dict[str, int]:
+        """每个 code 的最新时间戳（只查 since 之后，靠 (venue, toYYYYMM) 分区裁剪）。
+
+        用途：按合约精确增量。已经新鲜到窗口末尾的合约一个请求都不发，落后的只补
+        [latest+step, end)。只查 since 之后是有意的——更早的合约不会出现在结果里，
+        调用方按「没有记录 = 按整窗拉」处理，于是长缺口不会被小时轮当成无界回补
+        （那是 gapcheck 的职责）。
+        """
+        tcol = TIME_COLUMN[table]
+        rows = self.query(
+            # 返回 epoch 秒而不是 datetime：ClickHouse 的 DateTime 读回来是无时区的，
+            # 而服务端时区是 Asia/Shanghai，直接和 UTC 的 end 比较会差 8 小时。
+            f"SELECT code, toUnixTimestamp(max({tcol})) FROM {self.database}.{table} "
+            f"WHERE venue = %(venue)s AND toUnixTimestamp({tcol}) >= %(since)s "
+            f"GROUP BY code",
+            {"venue": venue, "since": int(since.timestamp())},
+        )
+        out: dict[str, int] = {}
+        for code, ts in rows:
+            if ts:                       # 0 = 1970，视为「没有记录」
+                out[code] = int(ts)
+        return out
+
+    def funding_state(self, venue: str, since: datetime) -> dict[str, tuple[int, int]]:
+        """每个 code 的 (最新结算 epoch, interval_sec)。
+
+        资金费率是 1h/4h/8h 结算的事件流，每小时都问一遍等于 7/8 的请求永远返回空。
+        有了 interval 就能算出「下次结算什么时候到」，没到就整轮跳过。
+        """
+        rows = self.query(
+            f"SELECT code, toUnixTimestamp(max(datetime)), argMax(interval_sec, datetime) "
+            f"FROM {self.database}.funding_rate "
+            f"WHERE venue = %(venue)s AND toUnixTimestamp(datetime) >= %(since)s "
+            f"GROUP BY code",
+            {"venue": venue, "since": int(since.timestamp())},
+        )
+        out: dict[str, tuple[int, int]] = {}
+        for code, ts, iv in rows:
+            if ts:
+                out[code] = (int(ts), int(iv or 0))
+        return out
+
     def venue_config_rows(self) -> list[dict[str, Any]]:
         """运行时配置覆盖（表不存在时返回空，不报错）。"""
         cols = [

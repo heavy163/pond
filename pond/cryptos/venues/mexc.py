@@ -196,11 +196,13 @@ class MexcAdapter(VenueAdapter):
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
         raw_rows: list[dict[str, Any]] = []
+        # 按窗口定页大小，别把 33 天历史拉回来只用 1 条
+        page_size = self.page_limit(start, end, per_page=100)
         page = 1
         while page <= 20:
             d = await self.request(
                 f"{self.BASE}/contract/funding_rate/history",
-                {"symbol": raw_code, "page_num": page, "page_size": 100},
+                {"symbol": raw_code, "page_num": page, "page_size": page_size},
                 endpoint="funding",
                 cost=1,
             )
@@ -215,7 +217,7 @@ class MexcAdapter(VenueAdapter):
                     raw_rows.append(r)
                 if t < start_ms:
                     hit_old = True
-            if hit_old or len(rows) < 100:
+            if hit_old or len(rows) < page_size:
                 break
             page += 1
         if not raw_rows:

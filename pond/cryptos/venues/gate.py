@@ -265,7 +265,8 @@ class GateAdapter(VenueAdapter):
                     "interval": "1h",
                     "from": cursor,
                     "to": page_end - 1,
-                    "limit": 1000,
+                    # 原 1000 根 = 41 天历史，6 小时窗口只用 7 根，单合约 572 KB
+                    "limit": self.page_limit(start, end, per_page=1000),
                 },
                 endpoint="oi",
                 cost=2,

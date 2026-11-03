@@ -113,14 +113,29 @@ def main() -> int:
     )
 
     print("\n" + "=" * 78)
-    print(f"{'venue':<12}{'status':<10}{'codes':>7}{'rows':>10}{'耗时':>10}{'errors':>8}")
+    print(f"{'venue':<12}{'status':<10}{'codes':>7}{'rows':>10}{'下载':>9}{'耗时':>9}{'errors':>7}")
+    total_bytes = 0
     for r in results:
+        nb = int(r.stats.get("bytes", 0))
+        total_bytes += nb
         print(
             f"{r.venue:<12}{r.status:<10}{r.codes:>7}{sum(r.rows.values()):>10}"
-            f"{r.duration_ms/1000:>9.1f}s{len(r.errors):>8}"
+            f"{nb/1048576:>8.1f}M{r.duration_ms/1000:>8.1f}s{len(r.errors):>7}"
         )
         for e in r.errors[:5]:
             print(f"    ! {e}")
+        # 流量归因：>200KB 的所把按接口的拆分打出来，省得下次再靠猜
+        per = {
+            k[6:]: v
+            for k, v in (r.stats or {}).items()
+            if k.startswith("bytes_") and v
+        }
+        if nb > 200 * 1024 and per:
+            top = sorted(per.items(), key=lambda kv: -kv[1])[:3]
+            print(
+                "      " + "  ".join(f"{k}={v/1024:.0f}KB" for k, v in top)
+            )
+    print(f"{'合计':<12}{'':<10}{'':>7}{'':>10}{total_bytes/1048576:>8.1f}M")
     print("=" * 78)
 
     if args.json:
