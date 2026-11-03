@@ -214,7 +214,10 @@ WITH w AS (
     GROUP BY machine, h
 ),
 r AS (
-    SELECT machine, h, v, v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1 AS ret
+    SELECT machine, h, v,
+           -- |小时收益|>5% 视为出入金（value 是权益，转账会整块跳变），置 0 而不是丢弃该小时
+           if(abs(v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) > 0.05, 0,
+              v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) AS ret
     FROM w
 )
 SELECT h AS time, round(sum(ret * v) / sum(v) * 1e4, 1) AS "组合每小时收益(bp)"
@@ -331,7 +334,9 @@ w AS (
     GROUP BY machine, h
 ),
 r AS (
-    SELECT h, v, v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1 AS ret
+    SELECT h, v,
+           if(abs(v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) > 0.05, 0,
+              v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) AS ret
     FROM w
 ),
 port AS (
@@ -382,7 +387,8 @@ w AS (
     WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime AND datetime <= $__toTime
     GROUP BY machine, h
 ),
-r AS (SELECT h, v, v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1 AS ret FROM w),
+r AS (SELECT h, v, if(abs(v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) > 0.05, 0,
+              v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY h) - 1) AS ret FROM w),
 port AS (SELECT h, sum(ret * v) / sum(v) AS p_ret FROM r GROUP BY h HAVING isFinite(p_ret)),
 disp AS (SELECT t, stddevPop(r1) AS sd FROM j WHERE isFinite(r1) GROUP BY t)
 SELECT round(corr(port.p_ret, disp.sd), 3)
@@ -405,6 +411,168 @@ SELECT '多空价差 24h（日均 bp）', round(avg(c) * 1e4, 1) FROM (
 UNION ALL
 SELECT '截面离散度（日均 bp）', round(avg(s) * 1e4, 1) FROM (
     SELECT t, stddevPop(r1) s FROM j WHERE isFinite(r1) GROUP BY t)"""
+
+# ── 市场状态与风格（2026-11-03 新增）──────────────────────────────
+# 口径（全部实测过，不是估算）：
+#   * universe = 模型覆盖的合约（futures_prediction 近 3 日出现过的 code）。
+#     ⚠️ 不含 BTCUSDT：它在因子表里 51,183 行 / 5 年 全 NaN、预测表 0 行，
+#        是 beta_tobtc 的基准而不是可交易标的。混进来会污染等权指数。
+#   * 市场收益 = 每小时同权截面均值，再按日求和 → 等权指数日收益。
+#   * 趋势效率 ER = |20日累计收益| / 20日累计绝对收益。0=纯震荡，1=单边。
+#   * 波动 = 等权日收益 20 日 stddev × sqrt(365)（crypto 7×24）。
+#   * 宽度 = 站上 120 小时均线的合约占比（取 20 日均值）。
+#   阈值取近 1 年分位：ER p70=0.305、波动 p70=54.2%。用绝对阈值而非滑动分位，
+#   面板更快，也不同为窗口变化而"改口径"。
+UNI_MODEL = f"""(SELECT DISTINCT code FROM quant.futures_prediction
+                WHERE model='{MODEL}' AND datetime >= $__fromTime - INTERVAL 3 DAY)"""
+
+STATE_CTE = f"""
+WITH kl AS (
+  SELECT code, open_time t, close,
+         close / lagInFrame(close) OVER (PARTITION BY code ORDER BY open_time) - 1 AS r,
+         avg(close) OVER (PARTITION BY code ORDER BY open_time ROWS 119 PRECEDING) AS ma120,
+         count() OVER (PARTITION BY code ORDER BY open_time ROWS 119 PRECEDING) AS c120
+  FROM quant.kline_futures_1h
+  WHERE open_time >= $__fromTime - INTERVAL 40 DAY AND open_time <= $__toTime
+    AND close > 0 AND code IN {UNI_MODEL}
+),
+h AS (SELECT t, avgIf(r, isFinite(r)) mkt,
+             countIf(c120 = 120 AND close > ma120) / nullIf(countIf(c120 = 120), 0) above
+      FROM kl GROUP BY t),
+d AS (SELECT toDate(t) d, sum(mkt) r, avg(above) ab FROM h WHERE isFinite(mkt) GROUP BY d),
+s AS (SELECT d, r,
+             abs(sum(r) OVER w) / nullIf(sum(abs(r)) OVER w, 0) er,
+             stddevPop(r) OVER w * sqrt(365) vol,
+             avg(ab) OVER w breadth,
+             count() OVER w nw
+      FROM d WINDOW w AS (ORDER BY d ROWS 19 PRECEDING))
+"""
+
+STATE_EXPR = ("multiIf(nw < 20, 0, er > 0.305 AND vol <= 0.542, 1, "
+              "er > 0.305, 2, vol <= 0.542, 3, 4)")
+
+SQL_STATE_SERIES = STATE_CTE + f"""
+SELECT d AS time, {STATE_EXPR} AS "状态"
+FROM s WHERE d >= toDate($__fromTime) ORDER BY time"""
+
+SQL_STATE_TS = STATE_CTE + """
+SELECT d AS time,
+       round(er, 3) AS "趋势效率ER",
+       round(vol * 100, 1) AS "年化波动%",
+       round(breadth * 100, 1) AS "站上MA120%"
+FROM s WHERE nw = 20 AND d >= toDate($__fromTime) ORDER BY time"""
+
+SQL_STAT_STATE = STATE_CTE + f"""
+SELECT {STATE_EXPR} AS "当前状态" FROM s WHERE nw = 20 ORDER BY d DESC LIMIT 1"""
+
+SQL_STAT_ER = STATE_CTE + """
+SELECT round(er, 3) AS "趋势效率ER" FROM s WHERE nw = 20 ORDER BY d DESC LIMIT 1"""
+
+SQL_STAT_VOL = STATE_CTE + """
+SELECT round(vol * 100, 1) AS "年化波动%" FROM s WHERE nw = 20 ORDER BY d DESC LIMIT 1"""
+
+SQL_STAT_BREADTH = STATE_CTE + """
+SELECT round(breadth * 100, 1) AS "站上MA120%" FROM s WHERE nw = 20 ORDER BY d DESC LIMIT 1"""
+
+# 风格价差：每天 00:00（CST）一个截面，按因子分 5 组，Q5−Q1 的未来 24h 超额。
+# 00:00 这个时点很关键：它让「前瞻 24h」正好等于策略按 toDate 记的那个自然日，
+# 两份日收益才能同日对齐（用 08:00 会错开 8 小时，相关性会被稀释）。
+STYLE_CTE = f"""
+WITH f AS (
+  SELECT jj_code code, close_time t,
+         trad_mom_24 AS fmom, rv_24 AS fvol, amihud1_24 AS filliq,
+         flowinratio_24 AS fflow, adx_24 AS fadx, rsi_24 AS frsi
+  FROM quant.`1h_generated_v3_V3_0_0`
+  WHERE close_time >= $__fromTime - INTERVAL 130 DAY AND close_time <= $__toTime
+    AND toHour(close_time) = 0 AND isFinite(rv_24) AND isFinite(trad_mom_24)
+    AND isFinite(amihud1_24) AND isFinite(flowinratio_24) AND isFinite(adx_24) AND isFinite(rsi_24)
+),
+kl AS (SELECT code, open_time t, close FROM quant.kline_futures_1h
+       WHERE open_time >= $__fromTime - INTERVAL 132 DAY AND open_time <= $__toTime + INTERVAL 2 DAY
+         AND close > 0),
+fwd AS (SELECT a.code, a.t, if(b.close > 0, b.close / a.close - 1, nan) r24
+        FROM kl a LEFT JOIN kl b ON b.code = a.code AND b.t = a.t + INTERVAL 24 HOUR),
+j AS (SELECT f.t t, f.fmom, f.fvol, f.filliq, f.fflow, f.fadx, f.frsi, fwd.r24
+      FROM f INNER JOIN fwd ON fwd.code = f.code AND fwd.t = f.t),
+e AS (SELECT t, fmom, fvol, filliq, fflow, fadx, frsi,
+             r24 - avg(r24) OVER (PARTITION BY t) ex
+      FROM j WHERE isFinite(r24)),
+g AS (SELECT toDate(t) d, ex,
+             ntile(5) OVER (PARTITION BY t ORDER BY fmom) qm,
+             ntile(5) OVER (PARTITION BY t ORDER BY fvol) qv,
+             ntile(5) OVER (PARTITION BY t ORDER BY filliq) qi,
+             ntile(5) OVER (PARTITION BY t ORDER BY fflow) qf,
+             ntile(5) OVER (PARTITION BY t ORDER BY fadx) qa,
+             ntile(5) OVER (PARTITION BY t ORDER BY -frsi) qr
+      FROM e),
+sp AS (SELECT d,
+              (avgIf(ex, qm = 5) - avgIf(ex, qm = 1)) * 1e4 AS s_mom,
+              (avgIf(ex, qv = 5) - avgIf(ex, qv = 1)) * 1e4 AS s_vol,
+              (avgIf(ex, qi = 5) - avgIf(ex, qi = 1)) * 1e4 AS s_illiq,
+              (avgIf(ex, qf = 5) - avgIf(ex, qf = 1)) * 1e4 AS s_flow,
+              (avgIf(ex, qa = 5) - avgIf(ex, qa = 1)) * 1e4 AS s_adx,
+              (avgIf(ex, qr = 5) - avgIf(ex, qr = 1)) * 1e4 AS s_rev
+       FROM g GROUP BY d)
+"""
+
+SQL_STYLE_CUM = STYLE_CTE + """
+SELECT d AS time,
+       round(sum(s_mom) OVER (ORDER BY d), 1)   AS "动量",
+       round(sum(s_vol) OVER (ORDER BY d), 1)   AS "高波动",
+       round(sum(s_illiq) OVER (ORDER BY d), 1) AS "非流动性",
+       round(sum(s_flow) OVER (ORDER BY d), 1)  AS "资金流",
+       round(sum(s_adx) OVER (ORDER BY d), 1)   AS "趋势强度",
+       round(sum(s_rev) OVER (ORDER BY d), 1)   AS "短期反转"
+FROM sp WHERE d >= toDate($__fromTime) ORDER BY time"""
+
+# 策略日收益（多机等权平均）——**必须剔出入金**，否则统计全是假的：
+#   value 是权益，出入金会让它整千整万地跳（实测 2025-12-27 主账号 8,492→16,328、
+#   2025-11-26 第二台 1,140→8,800、2026-07-13 主账号 12,720→22,993），
+#   不处理时单日「收益」能到 +703%，把日均从 ~20bp 拉到 339bp。
+#   做法：按小时取样→逐小时收益→|r|>5% 视为出入金置 0→日内连乘得日收益。
+#   5% 的依据：该策略小时 |收益| 的 p99=1.81%、p99.9=28.6%，真实交易小时几乎不会越过 5%。
+SRET_CTE = f"""
+WITH h AS (SELECT machine, toStartOfHour(datetime) hh, argMax(value, datetime) v
+           FROM quant.future_wallet
+           WHERE strategy = '{STRATEGY}' AND datetime >= $__fromTime - INTERVAL 40 DAY
+             AND datetime <= $__toTime
+           GROUP BY machine, hh),
+hr AS (SELECT machine, hh, v / lagInFrame(v) OVER (PARTITION BY machine ORDER BY hh) - 1 r FROM h),
+hc AS (SELECT machine, hh, if(abs(r) > 0.05, 0, r) AS r FROM hr WHERE isFinite(r)),
+dd AS (SELECT machine, toDate(hh) d, exp(sum(log(1 + r))) - 1 AS dr FROM hc GROUP BY machine, d),
+sret AS (SELECT d, avg(dr) AS dret FROM dd GROUP BY d)
+"""
+
+SQL_STYLE_CORR = STYLE_CTE + "," + SRET_CTE.replace("WITH ", "") + """
+SELECT '动量' AS "风格", round(corr(s_mom, dret), 3) AS "相关性",
+       round(corr(s_mom, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_mom), 0), 3) AS "Beta"
+FROM sp INNER JOIN sret ON sp.d = sret.d
+UNION ALL SELECT '高波动', round(corr(s_vol, dret), 3), round(corr(s_vol, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_vol), 0), 3)
+FROM sp INNER JOIN sret ON sp.d = sret.d
+UNION ALL SELECT '非流动性', round(corr(s_illiq, dret), 3), round(corr(s_illiq, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_illiq), 0), 3)
+FROM sp INNER JOIN sret ON sp.d = sret.d
+UNION ALL SELECT '资金流', round(corr(s_flow, dret), 3), round(corr(s_flow, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_flow), 0), 3)
+FROM sp INNER JOIN sret ON sp.d = sret.d
+UNION ALL SELECT '趋势强度', round(corr(s_adx, dret), 3), round(corr(s_adx, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_adx), 0), 3)
+FROM sp INNER JOIN sret ON sp.d = sret.d
+UNION ALL SELECT '短期反转', round(corr(s_rev, dret), 3), round(corr(s_rev, dret) * stddevSamp(dret) * 1e4 / nullIf(stddevSamp(s_rev), 0), 3)
+FROM sp INNER JOIN sret ON sp.d = sret.d"""
+
+# 策略在四种市场状态下的表现（这是「策略适应什么状态」的直接答案）
+SQL_STATE_PERF = STATE_CTE + f""",
+{SRET_CTE[5:]}
+SELECT multiIf(any(st) = 1, '① 趋势·低波', any(st) = 2, '② 趋势·高波',
+               any(st) = 3, '③ 震荡·低波', '④ 震荡·高波') AS "市场状态",
+       count() AS "天数",
+       round(avg(ret) * 1e4, 1) AS "策略日均bp",
+       round(median(ret) * 1e4, 1) AS "中位bp",
+       round(avg(ret) / nullIf(stddevPop(ret) / sqrt(count()), 0), 2) AS "t值",
+       round(countIf(ret > 0) / count() * 100, 1) AS "胜率%",
+       round(stddevPop(ret) * 1e4, 1) AS "日波动bp"
+FROM (
+    SELECT d, {STATE_EXPR} AS st, dret AS ret
+    FROM s INNER JOIN sret ON s.d = sret.d WHERE nw = 20
+) GROUP BY st ORDER BY st"""
 
 # ── 布局 ─────────────────────────────────────────────────────────
 P: list[dict] = []
@@ -460,15 +628,44 @@ def ts(pid, title, sql, x, y, w, h, unit=None, desc="", bars=False, time_from=No
     }
 
 
-def table(pid, title, sql, x, y, w=24, h=7, desc=""):
+def table(pid, title, sql, x, y, w=24, h=7, desc="", time_from=None):
     return {
         "id": pid, "title": title, "type": "table", "description": desc,
         "datasource": {"type": DS_TYPE, "uid": DS_UID},
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        **(({"timeFrom": time_from} if time_from else {})),
         "targets": [q(sql, 0)],
         "options": {"showHeader": True, "cellHeight": "sm"},
         "fieldConfig": {"defaults": {"custom": {"align": "auto", "filterable": True}}, "overrides": []},
     }
+
+
+def state_tl(pid, title, sql, x, y, w, h, desc="", time_from=None):
+    """状态时间带：把一个数值码映射成有语义的色块（Grafana 11 原生 state-timeline）。"""
+    return {
+        "id": pid, "title": title, "type": "state-timeline", "description": desc,
+        "datasource": {"type": DS_TYPE, "uid": DS_UID},
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        **(({"timeFrom": time_from} if time_from else {})),
+        "targets": [q(sql, 1)],
+        "options": {"showValue": "auto", "mergeValues": True, "alignValue": "center",
+                    "rowHeight": 0.85, "tooltip": {"mode": "single"},
+                    "legend": {"showLegend": True, "displayMode": "list", "placement": "bottom"}},
+        "fieldConfig": {"defaults": {
+            "custom": {"lineWidth": 0, "fillOpacity": 75},
+            "mappings": [{"type": "value", "options": STATE_MAP}],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        }, "overrides": []},
+    }
+
+
+STATE_MAP = {
+    "0": {"text": "预热中", "color": "dark-gray", "index": 0},
+    "1": {"text": "① 趋势·低波", "color": "green", "index": 1},
+    "2": {"text": "② 趋势·高波", "color": "orange", "index": 2},
+    "3": {"text": "③ 震荡·低波", "color": "blue", "index": 3},
+    "4": {"text": "④ 震荡·高波", "color": "red", "index": 4},
+}
 
 
 # 第 0 屏：结论
@@ -495,7 +692,7 @@ P.append(stat(nid(), "收益↔离散度 相关性", SQL_STAT_CORR, 20, 0, decim
 
 y = 4
 # ① 截面机会
-P.append(row(nid(), "① 截面机会：市场给了多大空间", y)); y += 1
+P.append(row(nid(), "② 截面机会：市场给了多大空间", y)); y += 1
 P.append(ts(nid(), "截面收益离散度（每小时）", SQL_DISPERSION, 0, y, 12, 8, unit="none",
             desc="std=全市场 1h 收益的横截面标准差；带宽=90 分位 − 10 分位。数值越大，截面越分化，选股空间越大。"))
 P.append(ts(nid(), "日均截面离散度", SQL_DISPERSION_DAILY, 12, y, 12, 8, unit="none", bars=True,
@@ -503,7 +700,7 @@ P.append(ts(nid(), "日均截面离散度", SQL_DISPERSION_DAILY, 12, y, 12, 8, 
 y += 8
 
 # ② 信号效力
-P.append(row(nid(), "② 信号效力：预测能不能排出对的顺序", y)); y += 1
+P.append(row(nid(), "③ 信号效力：预测能不能排出对的顺序", y)); y += 1
 P.append(ts(nid(), "每日 Rank IC（1h / 24h / 72h）", SQL_IC_DAILY, 0, y, 12, 8,
             desc="模型 horizon 是 72h，看 IC 随 horizon 衰减的形状：1h 高=做短，72h 高=信号慢。"))
 P.append(table(nid(), "10 分组 × 未来 24h 超额收益", SQL_DECILE, 12, y, 12, 8,
@@ -527,7 +724,7 @@ P.append(_ic_panel)
 y += 8
 
 # ③ 策略实盘
-P.append(row(nid(), "③ 策略实盘：吃到了多少", y)); y += 1
+P.append(row(nid(), "④ 策略实盘：吃到了多少", y)); y += 1
 P.append(ts(nid(), "净值曲线（各机器归一化，窗口起点=100）", SQL_WALLET, 0, y, 12, 8, unit="none",
             desc="三台机器本金差一个数量级（≈2.7k / 4.2k / 25k USDT），原值画在一张图上小账户会被压平。"
                  "这里各自归一化到窗口起点=100，看的是相对表现；绝对规模见右侧合计面板。"))
@@ -548,7 +745,7 @@ y += 8
 # ④ 敞口与资金效率
 # 策略是 3 天持有 × 3 个子策略轮转，每天只写一个 cohort 的快照。
 # 只看单日快照会把 gross 低估 3 倍（我曾据此得出"仓位只有 31%"的错误结论）。
-P.append(row(nid(), "④ 敞口与资金效率（3 cohort 合计）", y)); y += 1
+P.append(row(nid(), "⑤ 敞口与资金效率（3 cohort 合计）", y)); y += 1
 P.append(stat(nid(), "仓位比例（gross/权益 %）", SQL_STAT_EXPO_RATIO, 0, y, 6, 4, unit="percent", decimals=1,
               desc="全部 cohort 的 gross 名义 / 账户权益。≈100% 即满仓；>100% 说明用了杠杆。",
               steps=[{"color": "red", "value": None}, {"color": "yellow", "value": 50},
@@ -567,7 +764,7 @@ P.append(ts(nid(), "各 cohort gross（USDT）", SQL_COHORT_GROSS, 12, y, 12, 7,
 y += 7
 
 # ⑤ 汇总
-P.append(row(nid(), "⑤ 汇总", y)); y += 1
+P.append(row(nid(), "⑥ 汇总", y)); y += 1
 P.append(table(nid(), "近 7 日关键指标", SQL_SUMMARY, 0, y, 12, 6))
 P.append(table(nid(), "说明", "SELECT '占位' AS a", 12, y, 12, 6))
 
@@ -581,15 +778,86 @@ P[-1] = {
         "否则会把没数据算成暴跌。\n\n"
         "**超额**：每小时先减截面均值再分组，避免把大盘涨跌算成选股能力。\n\n"
         "**分组**：`value_group` 9/10=多、1/2=空（按 `future_position` 的 side×group 实测确认），10 分组是独立按 `value` 重排的视角。\n\n"
+        "**实盘**：`future_wallet` 净值 → 按机器净值加权成组合小时收益；\n\n"
+        "**⚠️ 出入金**：`value` 是账户权益，入金/出金会让它整千整万地跳（实测 2025-12-27 主账号 8,492→16,328、"
+        "2026-07-13 12,720→22,993）。所有收益类面板都先把 |小时收益|>5% 的小时置 0（该策略小时 |收益| p99=1.81%，"
+        "5% 只可能是转账）。不这样处理，日均会被从 5bp 拉到 300bp 以上、波动翻倍——"
+        "旧版按原始净值算的「组合每小时收益」在这点上是有偏的。\n\n"
+        "**风格价差**：每天 00:00(CST) 取一个截面，按因子分 5 组，Q5−Q1 的未来 24h 超额，再累加。"
+        "00:00 让「前瞻 24h」正好等于策略按 `toDate` 记的自然日。\n\n"
         "**实盘**：`future_wallet` 净值 → 按机器净值加权成组合小时收益；"
         "`future_position` 按小时取 uniq pair 作为持仓宽度。"
     )},
 }
 
+# ② 市场状态与风格适配（插在 ① 之后：这是最该先看的一屏）
+# 先把已有分区整体下移，把 y=4 让出来
+SHIFT = 26
+for _p in P:
+    if _p["gridPos"]["y"] >= 4:
+        _p["gridPos"]["y"] += SHIFT
+
+y = 4
+P.append(row(nid(), "① 市场状态与风格适配：现在是什么环境、策略在吃什么", y)); y += 1
+
+_st = stat(nid(), "当前市场状态", SQL_STAT_STATE, 0, y, 6, 4, decimals=0,
+           desc="由「趋势效率 ER」与「20日年化波动」两个 1 年分位阈值判定：\n"
+                "① 趋势·低波 = ER>0.305 且波动≤54.2%（趋势策略最舒服）\n"
+                "② 趋势·高波 = ER>0.305 但波动>54.2%（有方向但回撤大）\n"
+                "③ 震荡·低波 = ER≤0.305 且波动≤54.2%（截面/反转更舒服）\n"
+                "④ 震荡·高波 = ER≤0.305 且波动>54.2%（最难做，降低仓位）")
+_st["fieldConfig"]["defaults"]["mappings"] = [{"type": "value", "options": STATE_MAP}]
+P.append(_st)
+
+P.append(stat(nid(), "站上 120h 均线的合约占比（%）", SQL_STAT_BREADTH, 6, y, 6, 4, unit="percent", decimals=1,
+              desc="市场宽度。1 年分位 p10=30.3 / p50=41.6 / p90=56.3。\n"
+                   "<35% 说明绝大多数合约在均线下方，做多截面要打折。",
+              steps=[{"color": "red", "value": None}, {"color": "orange", "value": 35.5},
+                     {"color": "yellow", "value": 41.6}, {"color": "green", "value": 47.4}]))
+P.append(stat(nid(), "趋势效率 ER（20日）", SQL_STAT_ER, 12, y, 6, 4, decimals=3,
+              desc="|20日累计收益| / 20日累计绝对收益。0=完全来回震荡，1=单边不回头。\n"
+                   "1 年分位：p10=0.038 / p50=0.199 / p90=0.438。>0.305 视为趋势环境。",
+              steps=[{"color": "blue", "value": None}, {"color": "yellow", "value": 0.12},
+                     {"color": "green", "value": 0.305}]))
+P.append(stat(nid(), "等权指数年化波动（%）", SQL_STAT_VOL, 18, y, 6, 4, unit="percent", decimals=1,
+              desc="全 universe 等权组合日收益的 20 日标准差 × √365。\n"
+                   "1 年分位：p10=32.1 / p50=49.6 / p90=86.3。>54.2 视为高波环境。",
+              steps=[{"color": "green", "value": None}, {"color": "yellow", "value": 42.3},
+                     {"color": "orange", "value": 54.2}, {"color": "red", "value": 86.3}]))
+y += 4
+
+P.append(state_tl(nid(), "过去 120 天市场状态（每格 = 1 个交易日）", SQL_STATE_SERIES, 0, y, 24, 6, time_from="now-120d",
+                  desc="四种状态的语义：① 趋势·低波（绿）/ ② 趋势·高波（橙）/ ③ 震荡·低波（蓝）/ ④ 震荡·高波（红）。\n"
+                       "看的是「状态切换的频率」——频繁在 ①↔④ 之间跳说明环境不稳定，策略换手会被放大的区间。"))
+y += 6
+
+P.append(ts(nid(), "风格轮动：各风格多空价差的累计值（Q5−Q1，bp）", SQL_STYLE_CUM, 0, y, 12, 8, unit="none", time_from="now-120d",
+            desc="每天 00:00 取一个截面，按该因子分 5 组，算 Q5−Q1 的未来 24h 超额，再累加。\n"
+                 "线向上 = 这个风格当下有效（顺着它做赚钱）；向下 = 该风格被反向交易/失效。\n"
+                 "动量/趋势强度上行 = 追涨有效；短期反转上行 = 抄跌有效；高波动上行 = 市场在给高波品种溢价。"))
+P.append(table(nid(), "策略在吃什么风格（风格价差 ↔ 策略日收益）", SQL_STYLE_CORR, 12, y, 12, 8, time_from="now-180d",
+               desc="正相关 = 策略与这个风格同向赚钱，即它实质上是一只「该风格」的策略；\n"
+                    "接近 0 = 这块风格不吃；负相关 = 策略在逆着这个风格（做反转/做低波）。\n"
+                    "Beta 是把风格价差当自变量回归策略收益的斜率：1bp 风格价差对应多少 bp 策略收益。"))
+y += 8
+
+P.append(table(nid(), "策略在不同市场状态下的表现（同日对齐）", SQL_STATE_PERF, 0, y, 12, 7, time_from="now-365d",
+               desc="把每个交易日按当时状态分组，看策略日均收益/胜率/日波动。\n"
+                    "「哪个状态赚钱、哪个状态亏钱、哪个状态波动最大」比总收益有用得多——\n"
+                    "如果收益高度集中在 ①，那仓位管理就该按状态开关，而不是恒定仓位。"))
+P.append(ts(nid(), "状态三指标：趋势效率 / 波动 / 宽度", SQL_STATE_TS, 12, y, 12, 7, unit="none",
+            desc="三条线放在同一张图看「环境怎么变」：\n"
+                 "ER 抬升 + 波动回落 = 舒服的趋势；ER 下行 + 波动抬升 = 混乱；\n"
+                 "宽度（站上 MA120 占比）领先于价格，跌破 35% 通常意味着普跌还在延续。"))
+y += 7
+
+# 行容器按数组顺序吸收后续面板：必须按 (y, 行优先) 重排，否则新分区会被并进最后一行
+P.sort(key=lambda _p: (_p["gridPos"]["y"], 0 if _p["type"] == "row" else 1))
+
 DASH = {
     "uid": DASH_UID,
     "title": "QuantSupervise v2 · 截面盈利能力",
-    "description": "围绕「截面机会 → 信号效力 → 实盘吃到多少」组织的策略监控。旧看板 QuantSupervise. 未改动。",
+    "description": "围绕「截面机会 → 市场状态与风格 → 信号效力 → 实盘吃到多少」组织的策略监控。旧看板 QuantSupervise. 未改动。",
     "tags": ["quant", "strategy", "cross-section"],
     "timezone": "browser",
     "editable": True,
@@ -639,7 +907,7 @@ def main() -> int:
     ap.add_argument("--verify", action="store_true")
     args = ap.parse_args()
     body = {"dashboard": DASH, "overwrite": True,
-            "message": "QuantSupervise v2：截面机会 → 信号效力 → 实盘吃到多少"}
+            "message": "QuantSupervise v2：新增 ② 市场状态与风格适配（状态时间带 / 风格轮动 / 分状态表现 / 风格相关性）"}
     r = api("/api/dashboards/db", "POST", body)
     print(f"[deploy] {r.get('status')} uid={r.get('uid')} version={r.get('version')}")
     print(f"[deploy] {GF}/d/{DASH_UID}")
